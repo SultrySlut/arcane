@@ -1,0 +1,332 @@
+-- ESP and Player Highlighting Script with Stand-Alone GUI
+-- Keybind changed from Right Alt to "[" (Enum.KeyCode.LeftBracket)
+
+local Players           = game:GetService("Players")
+local RunService        = game:GetService("RunService")
+local UserInputService  = game:GetService("UserInputService")
+local TweenService      = game:GetService("TweenService")
+local CoreGui           = game:GetService("CoreGui")
+local Camera            = workspace.CurrentCamera
+
+local LocalPlayer = Players.LocalPlayer
+local Mouse       = LocalPlayer:GetMouse()
+
+-- ────────────────────────────────────────────────────────────────────────────
+-- CONFIGURATION
+-- ────────────────────────────────────────────────────────────────────────────
+local Config = {
+    ShowESP      = false,
+    ShowHighlight= false,
+    ShowName     = true,
+    ShowHP       = true,
+    ShowStuds    = true,
+    GUIVisible   = true,
+    ToggleKey    = Enum.KeyCode.LeftBracket,   --  ← keybind here
+}
+
+-- ────────────────────────────────────────────────────────────────────────────
+-- STATE
+-- ────────────────────────────────────────────────────────────────────────────
+local State = {
+    ESP         = {},
+    HoverPlayer = nil,
+    Characters  = {},
+}
+
+-- distance thresholds for colour coding
+local DIST_CLOSE  =  75
+local DIST_MEDIUM = 149
+local DIST_FAR    = 299
+
+-- ────────────────────────────────────────────────────────────────────────────
+-- GUI
+-- ────────────────────────────────────────────────────────────────────────────
+local ScreenGui = Instance.new("ScreenGui")
+ScreenGui.Name = "ESPHighlightGUI"
+ScreenGui.ResetOnSpawn = false
+ScreenGui.Parent = CoreGui
+
+local MainFrame = Instance.new("Frame")
+MainFrame.Size = UDim2.new(0, 280, 0, 320)
+MainFrame.Position = UDim2.new(0, 10, 0.5, -160)
+MainFrame.BackgroundColor3 = Color3.fromRGB(35, 35, 45)
+MainFrame.BorderSizePixel = 0
+MainFrame.Active, MainFrame.Draggable = true, true
+MainFrame.Parent = ScreenGui
+
+local MainCorner = Instance.new("UICorner", MainFrame)
+MainCorner.CornerRadius = UDim.new(0, 10)
+
+local MainGradient = Instance.new("UIGradient", MainFrame)
+MainGradient.Color = ColorSequence.new{
+    ColorSequenceKeypoint.new(0, Color3.fromRGB(45,45,65)),
+    ColorSequenceKeypoint.new(1, Color3.fromRGB(35,35,45))
+}
+MainGradient.Rotation = 90
+
+local TitleBar = Instance.new("Frame", MainFrame)
+TitleBar.Size = UDim2.new(1, 0, 0, 40)
+TitleBar.BackgroundColor3 = Color3.fromRGB(50, 100, 180)
+TitleBar.BorderSizePixel = 0
+
+local TitleCorner = Instance.new("UICorner", TitleBar)
+TitleCorner.CornerRadius = UDim.new(0, 10)
+
+local TitleLabel = Instance.new("TextLabel", TitleBar)
+TitleLabel.Size = UDim2.new(1, -20, 1, 0)
+TitleLabel.Position = UDim2.new(0, 10, 0, 0)
+TitleLabel.BackgroundTransparency = 1
+TitleLabel.Font = Enum.Font.GothamBold
+TitleLabel.TextSize = 18
+TitleLabel.TextColor3 = Color3.new(1,1,1)
+TitleLabel.TextXAlignment = Enum.TextXAlignment.Left
+TitleLabel.Text = "ESP & Highlight - Drag to Move"
+
+-- ────────────────────────────────────────────────────────────────────────────
+-- TOGGLE BUTTON FACTORY
+-- ────────────────────────────────────────────────────────────────────────────
+local function createToggleButton(parent, position, size, text, getFunc, setFunc)
+    local holder = Instance.new("Frame", parent)
+    holder.Position, holder.Size = position, size
+    holder.BackgroundTransparency = 1
+
+    local label = Instance.new("TextLabel", holder)
+    label.Size = UDim2.new(0.7, -5, 1, 0)
+    label.Position = UDim2.new(0, 5, 0, 0)
+    label.BackgroundTransparency = 1
+    label.Font = Enum.Font.GothamSemibold
+    label.TextSize = 14
+    label.TextColor3 = Color3.new(1,1,1)
+    label.TextXAlignment = Enum.TextXAlignment.Left
+    label.Text = text
+
+    local toggleBg = Instance.new("Frame", holder)
+    toggleBg.Size = UDim2.new(0, 40, 0, 20)
+    toggleBg.Position = UDim2.new(1, -45, 0.5, 0)
+    toggleBg.AnchorPoint = Vector2.new(0,0.5)
+
+    local toggleCorner = Instance.new("UICorner", toggleBg)
+    toggleCorner.CornerRadius = UDim.new(1, 0)
+
+    local knob = Instance.new("Frame", toggleBg)
+    knob.Size = UDim2.new(0, 16, 0, 16)
+    knob.AnchorPoint = Vector2.new(0,0.5)
+    knob.Position = UDim2.new(0, 2, 0.5, 0)
+    knob.BackgroundColor3 = Color3.new(1,1,1)
+
+    local knobCorner = Instance.new("UICorner", knob)
+    knobCorner.CornerRadius = UDim.new(1,0)
+
+    local function refresh(animate)
+        local on = getFunc()
+        local targetPos  = on and UDim2.new(1, -18, 0.5, 0) or UDim2.new(0,2,0.5,0)
+        local targetCol  = on and Color3.fromRGB(52,168,83)    or Color3.fromRGB(120,120,120)
+        if animate then
+            TweenService:Create(knob, TweenInfo.new(0.2, Enum.EasingStyle.Quad), {Position = targetPos}):Play()
+            TweenService:Create(toggleBg, TweenInfo.new(0.2, Enum.EasingStyle.Quad), {BackgroundColor3 = targetCol}):Play()
+        else
+            knob.Position, toggleBg.BackgroundColor3 = targetPos, targetCol
+        end
+    end
+    refresh(false)
+
+    holder.InputBegan:Connect(function(input)
+        if input.UserInputType == Enum.UserInputType.MouseButton1 then
+            setFunc(not getFunc())
+            refresh(true)
+        end
+    end)
+end
+
+-- ────────────────────────────────────────────────────────────────────────────
+-- ESP FUNCTIONS
+-- ────────────────────────────────────────────────────────────────────────────
+local function makeESP(player)
+    if State.ESP[player] then return end
+    local txt = Drawing.new("Text")
+    txt.Font, txt.Size, txt.Center, txt.Outline = 3, 18, true, true
+    txt.OutlineColor = Color3.new(0,0,0)
+    txt.Visible = Config.ShowESP
+    State.ESP[player] = txt
+end
+
+local function removeESP(player)
+    if State.ESP[player] then
+        State.ESP[player]:Remove()
+        State.ESP[player] = nil
+    end
+end
+
+local function getDistance(a, b)
+    local charA, charB = a.Character, b.Character
+    if not (charA and charB) then return math.huge end
+    local hrpA, hrpB = charA:FindFirstChild("HumanoidRootPart"), charB:FindFirstChild("HumanoidRootPart")
+    if not (hrpA and hrpB) then return math.huge end
+    return (hrpA.Position - hrpB.Position).Magnitude
+end
+
+local function colourByDist(d)
+    if d <= DIST_CLOSE  then return Color3.fromRGB(255,0,90)   end
+    if d <= DIST_MEDIUM then return Color3.fromRGB(180,0,255)  end
+    if d <= DIST_FAR    then return Color3.fromRGB(80,0,255)   end
+    return Color3.fromRGB(150,150,150)
+end
+
+local function buildLine(player, hp, dist)
+    local parts = {}
+    if Config.ShowName  then table.insert(parts, player.DisplayName) end
+    if Config.ShowHP    then table.insert(parts, "["..hp.." HP]")    end
+    if Config.ShowStuds then table.insert(parts, "["..dist.."]")     end
+    return table.concat(parts, " ")
+end
+
+local function updateESP()
+    for pl, label in pairs(State.ESP) do
+        local char, head = pl.Character, pl.Character and pl.Character:FindFirstChild("Head")
+        if char and head then
+            local pos, onScreen = Camera:WorldToViewportPoint(head.Position)
+            label.Visible = Config.ShowESP and onScreen
+            if onScreen then
+                label.Position = Vector2.new(pos.X, pos.Y-25)
+                local dist   = math.floor(getDistance(LocalPlayer, pl))
+                local hp     = "?"
+                local hum    = char:FindFirstChildOfClass("Humanoid")
+                if hum then hp = math.floor(hum.Health) end
+                label.Text  = buildLine(pl, hp, dist)
+                label.Color = colourByDist(dist)
+            end
+        else
+            label.Visible = false
+        end
+    end
+end
+
+-- ────────────────────────────────────────────────────────────────────────────
+-- HIGHLIGHTING
+-- ────────────────────────────────────────────────────────────────────────────
+local function nearestToCursor()
+    local mouseV2 = Vector2.new(Mouse.X, Mouse.Y)
+    local nearest, bestDist = nil, math.huge
+    for pl, char in pairs(State.Characters) do
+        if pl ~= LocalPlayer then
+            local head = char:FindFirstChild("Head")
+            if head then
+                local vp, onScr = Camera:WorldToViewportPoint(head.Position)
+                if onScr then
+                    local screenDist = (mouseV2 - Vector2.new(vp.X, vp.Y)).Magnitude
+                    if screenDist < bestDist then
+                        nearest, bestDist = pl, screenDist
+                    end
+                end
+            end
+        end
+    end
+    return nearest
+end
+
+local function updateHighlight()
+    if not Config.ShowHighlight then return end
+    local target = nearestToCursor()
+    if target ~= State.HoverPlayer then
+        -- remove old
+        for _, h in ipairs(CoreGui:GetChildren()) do
+            if h:IsA("Highlight") and h.Name == "PlayerHighlight" then h:Destroy() end
+        end
+        State.HoverPlayer = target
+        if target and target.Character then
+            local hl = Instance.new("Highlight")
+            hl.Name = "PlayerHighlight"
+            hl.Adornee = target.Character
+            hl.FillColor = Color3.fromRGB(255,0,149)
+            hl.OutlineColor = Color3.new(1,1,1)
+            hl.FillTransparency = 0.85
+            hl.Parent = CoreGui
+        end
+    end
+end
+
+-- ────────────────────────────────────────────────────────────────────────────
+-- PLAYER TRACKING
+-- ────────────────────────────────────────────────────────────────────────────
+local function handleCharacter(pl, char)
+    State.Characters[pl] = char
+    makeESP(pl)
+end
+
+local function trackPlayers()
+    for _, pl in ipairs(Players:GetPlayers()) do
+        if pl ~= LocalPlayer then
+            makeESP(pl)
+            if pl.Character then handleCharacter(pl, pl.Character) end
+            pl.CharacterAdded:Connect(function(c) handleCharacter(pl,c) end)
+            pl.CharacterRemoving:Connect(function() State.Characters[pl] = nil end)
+        end
+    end
+    Players.PlayerAdded:Connect(function(pl)
+        if pl ~= LocalPlayer then
+            makeESP(pl)
+            pl.CharacterAdded:Connect(function(c) handleCharacter(pl,c) end)
+        end
+    end)
+    Players.PlayerRemoving:Connect(function(pl)
+        State.Characters[pl] = nil
+        removeESP(pl)
+    end)
+end
+
+-- ────────────────────────────────────────────────────────────────────────────
+-- TOGGLES
+-- ────────────────────────────────────────────────────────────────────────────
+local y, step = 60, 35
+
+local function addToggle(label, prop)
+    createToggleButton(MainFrame, UDim2.new(0,10,0,y), UDim2.new(1,-20,0,30),
+        label,
+        function() return Config[prop] end,
+        function(v)
+            Config[prop] = v
+            if prop == "ShowESP" then
+                for _, e in pairs(State.ESP) do e.Visible = v end
+            elseif prop == "ShowHighlight" and not v then
+                for _, h in ipairs(CoreGui:GetChildren()) do
+                    if h:IsA("Highlight") and h.Name == "PlayerHighlight" then h:Destroy() end
+                end
+                State.HoverPlayer = nil
+            end
+        end)
+    y = y + step
+end
+
+addToggle("ESP"           , "ShowESP")
+addToggle("Player Highlight","ShowHighlight")
+addToggle("Show Name"     , "ShowName")
+addToggle("Show HP"       , "ShowHP")
+addToggle("Show Distance" , "ShowStuds")
+
+-- ────────────────────────────────────────────────────────────────────────────
+-- KEYBIND TOGGLE
+-- ────────────────────────────────────────────────────────────────────────────
+UserInputService.InputBegan:Connect(function(input, gp)
+    if gp then return end
+    if input.KeyCode == Config.ToggleKey then
+        Config.GUIVisible = not Config.GUIVisible
+        MainFrame.Visible = Config.GUIVisible
+    end
+end)
+
+-- ────────────────────────────────────────────────────────────────────────────
+-- MAIN LOOP
+-- ────────────────────────────────────────────────────────────────────────────
+RunService.RenderStepped:Connect(function()
+    updateESP()
+    updateHighlight()
+end)
+
+-- INIT
+trackPlayers()
+
+game.StarterGui:SetCore("SendNotification", {
+    Title    = "ESP & Highlight Active",
+    Text     = 'Press "[" to toggle GUI',
+    Duration = 3
+})
