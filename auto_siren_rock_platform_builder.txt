@@ -1,0 +1,232 @@
+-- Auto SirenRock Platform Builder Script
+-- Detects SirenRocks within range, removes Fragmentable, and builds platforms at Water location
+
+local Players = game:GetService('Players')
+local Workspace = game:GetService('Workspace')
+local LocalPlayer = Players.LocalPlayer
+
+-- Configuration
+local DETECTION_RANGE = 2000 -- Studs radius
+local processedRocks = {} -- Track which rocks we've already processed
+
+-- Get player position
+local function getPlayerPosition()
+    if LocalPlayer.Character and LocalPlayer.Character:FindFirstChild('HumanoidRootPart') then
+        return LocalPlayer.Character.HumanoidRootPart.Position
+    end
+    return nil
+end
+
+-- Build platform structure at water location
+local function buildPlatformAtWater(sirenRock, waterPart)
+    print("Building platform for SirenRock:", sirenRock.Name, "at water location")
+    
+    -- Get water part properties
+    local waterPos = waterPart.Position
+    
+    -- Function to create parts
+    local function createPart(name, size, position, material, color)
+        local part = Instance.new("Part")
+        part.Name = name
+        part.Size = size
+        part.Position = position
+        part.Material = material
+        part.BrickColor = BrickColor.new(color)
+        part.Anchored = true
+        part.Parent = sirenRock
+        return part
+    end
+    
+    -- Function to create a ramp
+    local function createRamp(name, position, size, rotation)
+        local ramp = Instance.new("WedgePart")
+        ramp.Name = name
+        ramp.Size = size
+        ramp.Position = position
+        ramp.Rotation = rotation
+        ramp.Material = Enum.Material.Concrete
+        ramp.BrickColor = BrickColor.new("Medium stone grey")
+        ramp.Anchored = true
+        ramp.Parent = sirenRock
+        return ramp
+    end
+    
+    -- Create platform (new floor) at water level - fixed size
+    local platform = createPart(
+        "SirenRockPlatform",
+        Vector3.new(200, 4, 200),
+        Vector3.new(waterPos.X, waterPos.Y + 2, waterPos.Z),
+        Enum.Material.Concrete,
+        "Medium stone grey"
+    )
+    
+    -- Create roof 60 studs above platform - larger 400x400 size
+    local roof = createPart(
+        "SirenRockRoof",
+        Vector3.new(400, 4, 400), -- Larger roof size
+        Vector3.new(waterPos.X, waterPos.Y + 64, waterPos.Z), -- Same Y position
+        Enum.Material.Concrete,
+        "Dark stone grey"
+    )
+    
+    -- Calculate ramp dimensions - large square ramps
+    local rampSize = 180 -- Large square ramps (180x180x180)
+    local rampHeight = rampSize -- Make it a cube
+    local platformSize = 200 -- Fixed platform size
+    
+    -- Create ramps on all four sides
+    local halfPlatform = platformSize / 2
+    
+    -- Calculate positions so highest point touches platform
+    local platformTopY = waterPos.Y + 4 -- Top of platform
+    local rampCenterY = platformTopY - (rampHeight / 2) -- Center ramp so top touches platform
+    
+    -- Create all four ramps
+    createRamp(
+        "NorthRamp",
+        Vector3.new(waterPos.X, rampCenterY, waterPos.Z + halfPlatform + (rampSize/2)),
+        Vector3.new(rampSize, rampHeight, rampSize),
+        Vector3.new(0, 180, 0)
+    )
+    
+    createRamp(
+        "SouthRamp",
+        Vector3.new(waterPos.X, rampCenterY, waterPos.Z - halfPlatform - (rampSize/2)),
+        Vector3.new(rampSize, rampHeight, rampSize),
+        Vector3.new(0, 0, 0)
+    )
+    
+    createRamp(
+        "EastRamp",
+        Vector3.new(waterPos.X + halfPlatform + (rampSize/2), rampCenterY, waterPos.Z),
+        Vector3.new(rampSize, rampHeight, rampSize),
+        Vector3.new(0, -90, 0)
+    )
+    
+    createRamp(
+        "WestRamp",
+        Vector3.new(waterPos.X - halfPlatform - (rampSize/2), rampCenterY, waterPos.Z),
+        Vector3.new(rampSize, rampHeight, rampSize),
+        Vector3.new(0, 90, 0)
+    )
+    
+    -- Create corner pillars that extend from platform to roof
+    local function createPillar(name, position)
+        return createPart(
+            name,
+            Vector3.new(4, 60, 4), -- 60 stud height to match roof height
+            Vector3.new(position.X, waterPos.Y + 32, position.Z), -- Centered between platform top and roof bottom
+            Enum.Material.Concrete,
+            "Dark stone grey"
+        )
+    end
+    
+    local pillarOffset = 80 -- Distance from center for pillars
+    createPillar("NorthEastPillar", Vector3.new(waterPos.X + pillarOffset, 0, waterPos.Z + pillarOffset))
+    createPillar("NorthWestPillar", Vector3.new(waterPos.X - pillarOffset, 0, waterPos.Z + pillarOffset))
+    createPillar("SouthEastPillar", Vector3.new(waterPos.X + pillarOffset, 0, waterPos.Z - pillarOffset))
+    createPillar("SouthWestPillar", Vector3.new(waterPos.X - pillarOffset, 0, waterPos.Z - pillarOffset))
+    
+    print("Platform structure created successfully at:", waterPos)
+end
+
+-- Process a single SirenRock
+local function processSirenRock(sirenRock)
+    if processedRocks[sirenRock] then
+        return -- Already processed
+    end
+    
+    print("Processing SirenRock:", sirenRock.Name)
+    
+    -- Remove Fragmentable if it exists
+    local fragmentable = sirenRock:FindFirstChild("Fragmentable")
+    if fragmentable then
+        fragmentable:Destroy()
+        print("Removed Fragmentable from:", sirenRock.Name)
+    else
+        print("No Fragmentable found in:", sirenRock.Name)
+    end
+    
+    -- Find Water part inside SirenRock
+    local waterPart = sirenRock:FindFirstChild("Water")
+    if waterPart and waterPart:IsA("BasePart") then
+        print("Found Water part in:", sirenRock.Name)
+        buildPlatformAtWater(sirenRock, waterPart)
+    else
+        print("No Water part found in:", sirenRock.Name)
+    end
+    
+    -- Mark as processed
+    processedRocks[sirenRock] = true
+    
+    -- Send notification
+    game.StarterGui:SetCore('SendNotification', {
+        Title = 'SirenRock Processed',
+        Text = 'Platform built for ' .. sirenRock.Name,
+        Duration = 3,
+    })
+end
+
+-- Find all SirenRocks in range
+local function findSirenRocksInRange()
+    local playerPos = getPlayerPosition()
+    if not playerPos then return end
+    
+    local workspace = game.Workspace
+    local map = workspace:FindFirstChild("Map")
+    if not map then return end
+    
+    local seaContent = map:FindFirstChild("SeaContent")
+    if not seaContent then return end
+    
+    local darkSea = seaContent:FindFirstChild("DarkSea")
+    if not darkSea then return end
+    
+    -- Look for SirenRock objects
+    for _, child in pairs(darkSea:GetChildren()) do
+        if child.Name == "SirenRock" then
+            -- Get SirenRock position
+            local sirenRockPos = nil
+            if child:IsA("Model") then
+                local primaryPart = child.PrimaryPart
+                if primaryPart then
+                    sirenRockPos = primaryPart.Position
+                else
+                    local part = child:FindFirstChildWhichIsA("BasePart", true)
+                    if part then
+                        sirenRockPos = part.Position
+                    end
+                end
+            elseif child:IsA("BasePart") then
+                sirenRockPos = child.Position
+            end
+            
+            if sirenRockPos then
+                local distance = (playerPos - sirenRockPos).Magnitude
+                if distance <= DETECTION_RANGE then
+                    processSirenRock(child)
+                end
+            end
+        end
+    end
+end
+
+-- Main detection loop
+local function detectionLoop()
+    while true do
+        findSirenRocksInRange()
+        task.wait(2) -- Check every 2 seconds
+    end
+end
+
+-- Start the detection
+spawn(detectionLoop)
+
+-- Notification
+game.StarterGui:SetCore('SendNotification', {
+    Title = 'Auto Platform Builder Active',
+    Text = 'Scanning for SirenRocks within ' .. DETECTION_RANGE .. ' studs',
+    Duration = 4,
+})
+
+print("Auto SirenRock Platform Builder started - Range:", DETECTION_RANGE, "studs")

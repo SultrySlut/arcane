@@ -1,0 +1,260 @@
+-- SirenRock Continuous Detection Script
+-- Continuously monitors and places indicators on SirenRock objects within range
+
+local Players = game:GetService("Players")
+local Workspace = game:GetService("Workspace")
+local LocalPlayer = Players.LocalPlayer
+
+-- Configuration
+local DETECTION_RANGE = 20000 -- Studs radius
+local UPDATE_RATE = 0.5 -- How often to scan for new SirenRocks and verify indicators
+local DISTANCE_UPDATE_RATE = 0.1 -- How often to update distance text
+
+-- Storage for tracked SirenRocks
+local trackedRocks = {}
+
+-- Get position from SirenRock (handles Models and Parts)
+local function getSirenRockPosition(sirenRock)
+    if sirenRock:IsA("Model") then
+        local primaryPart = sirenRock.PrimaryPart
+        if primaryPart then
+            return primaryPart.Position
+        else
+            -- Try to find any part in the model
+            local part = sirenRock:FindFirstChildWhichIsA("BasePart", true)
+            if part then
+                return part.Position
+            end
+        end
+    elseif sirenRock:IsA("BasePart") then
+        return sirenRock.Position
+    end
+    return nil
+end
+
+-- Get the appropriate parent for the BillboardGui
+local function getGuiParent(sirenRock)
+    if sirenRock:IsA("Model") then
+        -- For models, try to use PrimaryPart or find first BasePart
+        if sirenRock.PrimaryPart then
+            return sirenRock.PrimaryPart
+        else
+            local part = sirenRock:FindFirstChildWhichIsA("BasePart", true)
+            if part then
+                return part
+            end
+        end
+    elseif sirenRock:IsA("BasePart") then
+        -- For parts, use the part directly
+        return sirenRock
+    end
+    return nil
+end
+
+-- Check if indicator exists on the rock
+local function hasIndicator(sirenRock)
+    local guiParent = getGuiParent(sirenRock)
+    if guiParent then
+        return guiParent:FindFirstChild("SirenRockIndicator") ~= nil
+    end
+    return false
+end
+
+-- Create distance indicator directly on SirenRock
+local function createIndicator(sirenRock)
+    local guiParent = getGuiParent(sirenRock)
+    if not guiParent then
+        return nil
+    end
+    
+    -- Check if indicator already exists
+    local existingGui = guiParent:FindFirstChild("SirenRockIndicator")
+    if existingGui then
+        return {
+            Gui = existingGui,
+            DistanceLabel = existingGui:FindFirstChild("Frame"):FindFirstChild("DistanceText"),
+            SirenRock = sirenRock,
+            GuiParent = guiParent
+        }
+    end
+    
+    local BillboardGui = Instance.new("BillboardGui")
+    BillboardGui.Name = "SirenRockIndicator"
+    BillboardGui.Size = UDim2.new(0, 200, 0, 100)
+    BillboardGui.StudsOffset = Vector3.new(0, 10, 0)
+    BillboardGui.AlwaysOnTop = true
+    BillboardGui.Parent = guiParent
+    
+    local Frame = Instance.new("Frame")
+    Frame.Name = "Frame"
+    Frame.Size = UDim2.new(1, 0, 1, 0)
+    Frame.BackgroundTransparency = 0.3
+    Frame.BackgroundColor3 = Color3.fromRGB(20, 20, 20)
+    Frame.BorderSizePixel = 0
+    Frame.Parent = BillboardGui
+    
+    local FrameCorner = Instance.new("UICorner")
+    FrameCorner.CornerRadius = UDim.new(0, 8)
+    FrameCorner.Parent = Frame
+    
+    local IconText = Instance.new("TextLabel")
+    IconText.Name = "IconText"
+    IconText.Size = UDim2.new(1, 0, 0.4, 0)
+    IconText.Position = UDim2.new(0, 0, 0, 5)
+    IconText.BackgroundTransparency = 1
+    IconText.Text = "⚠️ SIREN ROCK"
+    IconText.TextColor3 = Color3.fromRGB(255, 100, 100)
+    IconText.TextScaled = true
+    IconText.Font = Enum.Font.SourceSansBold
+    IconText.Parent = Frame
+    
+    local DistanceText = Instance.new("TextLabel")
+    DistanceText.Name = "DistanceText"
+    DistanceText.Size = UDim2.new(1, 0, 0.5, 0)
+    DistanceText.Position = UDim2.new(0, 0, 0.4, 0)
+    DistanceText.BackgroundTransparency = 1
+    DistanceText.Text = "0 studs"
+    DistanceText.TextColor3 = Color3.fromRGB(255, 255, 255)
+    DistanceText.TextScaled = true
+    DistanceText.Font = Enum.Font.SourceSans
+    DistanceText.Parent = Frame
+    
+    return {
+        Gui = BillboardGui,
+        DistanceLabel = DistanceText,
+        SirenRock = sirenRock,
+        GuiParent = guiParent
+    }
+end
+
+-- Find all SirenRocks in Workspace
+local function findAllSirenRocks()
+    local sirenRocks = {}
+    
+    for _, descendant in pairs(Workspace:GetDescendants()) do
+        if descendant.Name == "SirenRock" then
+            table.insert(sirenRocks, descendant)
+        end
+    end
+    
+    return sirenRocks
+end
+
+-- Main scanning loop
+local function scanningLoop()
+    while true do
+        local character = LocalPlayer.Character
+        if character and character:FindFirstChild("HumanoidRootPart") then
+            local playerPos = character.HumanoidRootPart.Position
+            
+            -- Find all current SirenRocks
+            local currentRocks = findAllSirenRocks()
+            
+            -- Process each found rock
+            for _, rock in pairs(currentRocks) do
+                local rockPos = getSirenRockPosition(rock)
+                
+                if rockPos then
+                    local distance = (playerPos - rockPos).Magnitude
+                    
+                    if distance <= DETECTION_RANGE then
+                        -- Check if indicator exists on the rock
+                        if not hasIndicator(rock) then
+                            -- Create or recreate indicator
+                            local indicator = createIndicator(rock)
+                            if indicator then
+                                trackedRocks[rock] = indicator
+                                print("Created/Recreated indicator for SirenRock at distance: " .. math.floor(distance) .. " studs")
+                            end
+                        elseif not trackedRocks[rock] then
+                            -- Indicator exists but not in our tracking, add it
+                            local guiParent = getGuiParent(rock)
+                            if guiParent then
+                                local existingGui = guiParent:FindFirstChild("SirenRockIndicator")
+                                if existingGui then
+                                    trackedRocks[rock] = {
+                                        Gui = existingGui,
+                                        DistanceLabel = existingGui:FindFirstChild("Frame"):FindFirstChild("DistanceText"),
+                                        SirenRock = rock,
+                                        GuiParent = guiParent
+                                    }
+                                end
+                            end
+                        end
+                        
+                        -- Update indicator if it exists
+                        if trackedRocks[rock] and trackedRocks[rock].Gui.Parent then
+                            trackedRocks[rock].DistanceLabel.Text = math.floor(distance) .. " studs"
+                            
+                            -- Update color based on distance
+                            local colorIntensity = math.clamp(1 - (distance / DETECTION_RANGE), 0.3, 1)
+                            trackedRocks[rock].DistanceLabel.TextColor3 = Color3.fromRGB(
+                                255,
+                                255 * (1 - colorIntensity),
+                                255 * (1 - colorIntensity)
+                            )
+                        end
+                    else
+                        -- Out of range - just remove from tracking
+                        if trackedRocks[rock] then
+                            trackedRocks[rock] = nil
+                            print("SirenRock went out of range")
+                        end
+                    end
+                end
+            end
+            
+            -- Clean up tracking table for rocks that no longer exist
+            for rock, _ in pairs(trackedRocks) do
+                if not rock.Parent then
+                    trackedRocks[rock] = nil
+                end
+            end
+        end
+        
+        task.wait(UPDATE_RATE)
+    end
+end
+
+-- Distance update loop (runs more frequently)
+local function distanceUpdateLoop()
+    while true do
+        local character = LocalPlayer.Character
+        if character and character:FindFirstChild("HumanoidRootPart") then
+            local playerPos = character.HumanoidRootPart.Position
+            
+            for rock, indicator in pairs(trackedRocks) do
+                if rock and rock.Parent and indicator.Gui and indicator.Gui.Parent then
+                    local rockPos = getSirenRockPosition(rock)
+                    if rockPos then
+                        local distance = (playerPos - rockPos).Magnitude
+                        indicator.DistanceLabel.Text = math.floor(distance) .. " studs"
+                        
+                        -- Update color based on distance
+                        local colorIntensity = math.clamp(1 - (distance / DETECTION_RANGE), 0.3, 1)
+                        indicator.DistanceLabel.TextColor3 = Color3.fromRGB(
+                            255,
+                            255 * (1 - colorIntensity),
+                            255 * (1 - colorIntensity)
+                        )
+                    end
+                end
+            end
+        end
+        
+        task.wait(DISTANCE_UPDATE_RATE)
+    end
+end
+
+-- Start continuous detection
+spawn(scanningLoop)
+spawn(distanceUpdateLoop)
+
+-- Notification
+game.StarterGui:SetCore("SendNotification", {
+    Title = "SirenRock Detection Active",
+    Text = "Continuously monitoring for SirenRocks",
+    Duration = 3
+})
+
+print("SirenRock continuous detection started - Range: " .. DETECTION_RANGE .. " studs")

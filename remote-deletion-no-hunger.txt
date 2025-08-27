@@ -1,0 +1,76 @@
+-- Script to Delete Specific Remote Events/Functions
+-- Deletes RainEffect from RS/Remotes/Misc and UpdateInsanity from RS/Remotes/UI
+-- Does NOT delete UpdateHunger
+
+local ReplicatedStorage = game:GetService("ReplicatedStorage")
+
+-- Function to safely find and delete a remote
+local function findAndDelete(path, remoteName)
+    local current = ReplicatedStorage
+    
+    -- Navigate through the path
+    for _, folderName in ipairs(path) do
+        local folder = current:FindFirstChild(folderName)
+        if not folder then
+            warn("Could not find folder: " .. folderName .. " in path")
+            return false
+        end
+        current = folder
+    end
+    
+    -- Find and delete the remote
+    local remote = current:FindFirstChild(remoteName)
+    if remote then
+        remote:Destroy()
+        print("Successfully deleted: " .. remoteName .. " from " .. table.concat(path, " > "))
+        return true
+    else
+        warn("Could not find remote: " .. remoteName .. " in " .. table.concat(path, " > "))
+        return false
+    end
+end
+
+-- Delete RainEffect from ReplicatedStorage > RS > Remotes > Misc
+local rainEffectDeleted = findAndDelete({"RS", "Remotes", "Misc"}, "RainEffect")
+
+-- Delete UpdateInsanity from ReplicatedStorage > RS > Remotes > UI
+local updateInsanityDeleted = findAndDelete({"RS", "Remotes", "UI"}, "UpdateInsanity")
+
+-- Summary notification
+local deletedCount = 0
+local deletedNames = {}
+
+if rainEffectDeleted then
+    deletedCount = deletedCount + 1
+    table.insert(deletedNames, "RainEffect")
+end
+
+if updateInsanityDeleted then
+    deletedCount = deletedCount + 1
+    table.insert(deletedNames, "UpdateInsanity")
+end
+
+-- Display notification based on results
+if deletedCount == 2 then
+    game.StarterGui:SetCore("SendNotification", {
+        Title = "Remote Deletion Complete",
+        Text = "Both remotes deleted successfully",
+        Duration = 3
+    })
+elseif deletedCount > 0 then
+    game.StarterGui:SetCore("SendNotification", {
+        Title = "Remote Deletion Partial",
+        Text = "Deleted " .. deletedCount .. " of 2 remotes: " .. table.concat(deletedNames, ", "),
+        Duration = 4
+    })
+else
+    game.StarterGui:SetCore("SendNotification", {
+        Title = "Remote Deletion Failed",
+        Text = "No remotes were found/deleted (check console)",
+        Duration = 3
+    })
+end
+
+print("Remote deletion script completed!")
+print("Results: Deleted " .. deletedCount .. " of 2 remotes")
+print("Note: UpdateHunger was intentionally NOT deleted")

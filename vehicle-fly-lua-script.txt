@@ -1,0 +1,351 @@
+-- Vehicle Fly Script (Nameless Admin vfly only)
+-- Toggle with N key
+-- Auto restart when entering/exiting vehicles
+
+local cmdlp = game.Players.LocalPlayer
+local cmdm = cmdlp:GetMouse()
+local workspace = game.workspace
+local RunService = game:GetService("RunService")
+local UserInputService = game:GetService("UserInputService")
+
+-- Initialize fly variables
+local FLYING = false
+local speedofthevfly = 10
+local CONTROL = {F = 0, B = 0, L = 0, R = 0, Q = 0, E = 0}
+local lCONTROL = {F = 0, B = 0, L = 0, R = 0, Q = 0, E = 0}
+local SPEED = 0
+local BG, BV
+local FlyGUI = nil
+local seatConnection = nil
+local wasInSeat = false
+
+-- Create GUI
+local function createGUI()
+    if FlyGUI then
+        FlyGUI:Destroy()
+    end
+    
+    local ScreenGui = Instance.new("ScreenGui")
+    ScreenGui.Name = "VFlySpeedGUI"
+    ScreenGui.ResetOnSpawn = false
+    ScreenGui.Parent = game:GetService("CoreGui")
+    FlyGUI = ScreenGui
+
+    -- Main Frame
+    local Frame = Instance.new("Frame")
+    Frame.Size = UDim2.new(0, 300, 0, 120)
+    Frame.Position = UDim2.new(0.5, -150, 0, 10)
+    Frame.BackgroundColor3 = Color3.fromRGB(35, 35, 35)
+    Frame.BorderSizePixel = 0
+    Frame.Active = true
+    Frame.Draggable = true
+    Frame.Parent = ScreenGui
+
+    -- Add rounded corners
+    local UICorner = Instance.new("UICorner")
+    UICorner.CornerRadius = UDim.new(0, 12)
+    UICorner.Parent = Frame
+
+    -- Title Label
+    local TitleLabel = Instance.new("TextLabel")
+    TitleLabel.Size = UDim2.new(1, 0, 0, 30)
+    TitleLabel.Position = UDim2.new(0, 0, 0, 0)
+    TitleLabel.BackgroundTransparency = 1
+    TitleLabel.Text = "Vehicle Fly Control"
+    TitleLabel.TextColor3 = Color3.fromRGB(255, 255, 255)
+    TitleLabel.TextScaled = true
+    TitleLabel.Font = Enum.Font.SourceSansBold
+    TitleLabel.Parent = Frame
+
+    -- Status Label
+    local StatusLabel = Instance.new("TextLabel")
+    StatusLabel.Name = "StatusLabel"
+    StatusLabel.Size = UDim2.new(1, -20, 0, 20)
+    StatusLabel.Position = UDim2.new(0, 10, 0, 30)
+    StatusLabel.BackgroundTransparency = 1
+    StatusLabel.Text = "Vehicle Fly: OFF | Press N to toggle"
+    StatusLabel.TextColor3 = Color3.fromRGB(255, 100, 100)
+    StatusLabel.TextScaled = true
+    StatusLabel.Font = Enum.Font.SourceSans
+    StatusLabel.Parent = Frame
+
+    -- Speed Label
+    local SpeedLabel = Instance.new("TextLabel")
+    SpeedLabel.Name = "SpeedLabel"
+    SpeedLabel.Size = UDim2.new(0, 60, 0, 20)
+    SpeedLabel.Position = UDim2.new(0, 10, 0, 55)
+    SpeedLabel.BackgroundTransparency = 1
+    SpeedLabel.Text = "Speed: " .. tostring(speedofthevfly)
+    SpeedLabel.TextColor3 = Color3.fromRGB(255, 255, 255)
+    SpeedLabel.TextScaled = true
+    SpeedLabel.Font = Enum.Font.SourceSans
+    SpeedLabel.Parent = Frame
+
+    -- Speed Slider
+    local SliderFrame = Instance.new("Frame")
+    SliderFrame.Size = UDim2.new(0, 200, 0, 20)
+    SliderFrame.Position = UDim2.new(0, 75, 0, 55)
+    SliderFrame.BackgroundColor3 = Color3.fromRGB(60, 60, 60)
+    SliderFrame.BorderSizePixel = 0
+    SliderFrame.Parent = Frame
+
+    local SliderCorner = Instance.new("UICorner")
+    SliderCorner.CornerRadius = UDim.new(0, 10)
+    SliderCorner.Parent = SliderFrame
+
+    local SliderFill = Instance.new("Frame")
+    SliderFill.Name = "SliderFill"
+    SliderFill.Size = UDim2.new(speedofthevfly/50, 0, 1, 0)
+    SliderFill.Position = UDim2.new(0, 0, 0, 0)
+    SliderFill.BackgroundColor3 = Color3.fromRGB(100, 200, 255)
+    SliderFill.BorderSizePixel = 0
+    SliderFill.Parent = SliderFrame
+
+    local FillCorner = Instance.new("UICorner")
+    FillCorner.CornerRadius = UDim.new(0, 10)
+    FillCorner.Parent = SliderFill
+
+    local SliderButton = Instance.new("TextButton")
+    SliderButton.Name = "SliderButton"
+    SliderButton.Size = UDim2.new(0, 20, 0, 20)
+    SliderButton.Position = UDim2.new(speedofthevfly/50, -10, 0, 0)
+    SliderButton.BackgroundColor3 = Color3.fromRGB(255, 255, 255)
+    SliderButton.Text = ""
+    SliderButton.BorderSizePixel = 0
+    SliderButton.Parent = SliderFrame
+
+    local ButtonCorner = Instance.new("UICorner")
+    ButtonCorner.CornerRadius = UDim.new(0, 10)
+    ButtonCorner.Parent = SliderButton
+
+    -- Instructions Label
+    local InstructionsLabel = Instance.new("TextLabel")
+    InstructionsLabel.Size = UDim2.new(1, -20, 0, 20)
+    InstructionsLabel.Position = UDim2.new(0, 10, 0, 85)
+    InstructionsLabel.BackgroundTransparency = 1
+    InstructionsLabel.Text = "W/A/S/D to move | Y = Up | T = Down | U = Toggle"
+    InstructionsLabel.TextColor3 = Color3.fromRGB(200, 200, 200)
+    InstructionsLabel.TextScaled = true
+    InstructionsLabel.Font = Enum.Font.SourceSans
+    InstructionsLabel.Parent = Frame
+
+    -- Slider functionality
+    local dragging = false
+
+    local function updateSpeed(percentage)
+        speedofthevfly = math.floor(percentage * 49) + 1 -- 1 to 50
+        SpeedLabel.Text = "Speed: " .. tostring(speedofthevfly)
+        SliderFill.Size = UDim2.new(percentage, 0, 1, 0)
+        SliderButton.Position = UDim2.new(percentage, -10, 0, 0)
+    end
+
+    SliderButton.MouseButton1Down:Connect(function()
+        dragging = true
+    end)
+
+    UserInputService.InputEnded:Connect(function(input)
+        if input.UserInputType == Enum.UserInputType.MouseButton1 then
+            dragging = false
+        end
+    end)
+
+    local sliderConnection
+    sliderConnection = RunService.RenderStepped:Connect(function()
+        if not FlyGUI or not FlyGUI.Parent then
+            sliderConnection:Disconnect()
+            return
+        end
+        
+        if dragging then
+            local mouse = UserInputService:GetMouseLocation()
+            local sliderPos = SliderFrame.AbsolutePosition.X
+            local sliderSize = SliderFrame.AbsoluteSize.X
+            local percentage = math.clamp((mouse.X - sliderPos) / sliderSize, 0, 1)
+            updateSpeed(percentage)
+        end
+    end)
+    
+    return ScreenGui
+end
+
+-- Update GUI status
+local function updateGUIStatus(status)
+    if FlyGUI and FlyGUI.Parent then
+        local statusLabel = FlyGUI:FindFirstChild("Frame"):FindFirstChild("StatusLabel")
+        if statusLabel then
+            if status then
+                statusLabel.Text = "Vehicle Fly: ON | Press U to toggle"
+                statusLabel.TextColor3 = Color3.fromRGB(100, 255, 100)
+            else
+                statusLabel.Text = "Vehicle Fly: OFF | Press U to toggle"
+                statusLabel.TextColor3 = Color3.fromRGB(255, 100, 100)
+            end
+        end
+    end
+end
+
+-- Exact sFLY function from Nameless Admin (vfly mode only)
+function sFLY(vfly)
+    FLYING = false
+    speedofthevfly = speedofthevfly or 10
+    
+    while not cmdlp or not cmdlp.Character or not cmdlp.Character:FindFirstChild('HumanoidRootPart') or not cmdlp.Character:FindFirstChild('Humanoid') or not cmdm do
+        wait()
+    end
+    
+    local T = cmdlp.Character.HumanoidRootPart
+    
+    local function FLY()
+        FLYING = true
+        BG = Instance.new('BodyGyro', T)
+        BV = Instance.new('BodyVelocity', T)
+        BG.P = 9e4
+        BG.maxTorque = Vector3.new(9e9, 9e9, 9e9)
+        BG.cframe = T.CFrame
+        BV.velocity = Vector3.new(0, 0, 0)
+        BV.maxForce = Vector3.new(9e9, 9e9, 9e9)
+        
+        spawn(function()
+            while FLYING do
+                -- vfly mode - no PlatformStand
+                
+                if CONTROL.L + CONTROL.R ~= 0 or CONTROL.F + CONTROL.B ~= 0 or CONTROL.Q + CONTROL.E ~= 0 then
+                    SPEED = 50
+                elseif not (CONTROL.L + CONTROL.R ~= 0 or CONTROL.F + CONTROL.B ~= 0 or CONTROL.Q + CONTROL.E ~= 0) and SPEED ~= 0 then
+                    SPEED = 0
+                end
+                
+                if (CONTROL.L + CONTROL.R) ~= 0 or (CONTROL.F + CONTROL.B) ~= 0 or (CONTROL.Q + CONTROL.E) ~= 0 then
+                    BV.velocity = ((workspace.CurrentCamera.CoordinateFrame.lookVector * (CONTROL.F + CONTROL.B)) + ((workspace.CurrentCamera.CoordinateFrame * CFrame.new(CONTROL.L + CONTROL.R, (CONTROL.F + CONTROL.B + CONTROL.Q + CONTROL.E) * 0.2, 0).p) - workspace.CurrentCamera.CoordinateFrame.p)) * SPEED
+                    lCONTROL = {F = CONTROL.F, B = CONTROL.B, L = CONTROL.L, R = CONTROL.R}
+                elseif (CONTROL.L + CONTROL.R) == 0 and (CONTROL.F + CONTROL.B) == 0 and (CONTROL.Q + CONTROL.E) == 0 and SPEED ~= 0 then
+                    BV.velocity = ((workspace.CurrentCamera.CoordinateFrame.lookVector * (lCONTROL.F + lCONTROL.B)) + ((workspace.CurrentCamera.CoordinateFrame * CFrame.new(lCONTROL.L + lCONTROL.R, (lCONTROL.F + lCONTROL.B + CONTROL.Q + CONTROL.E) * 0.2, 0).p) - workspace.CurrentCamera.CoordinateFrame.p)) * SPEED
+                else
+                    BV.velocity = Vector3.new(0, 0, 0)
+                end
+                
+                BG.cframe = workspace.CurrentCamera.CoordinateFrame
+                wait()
+            end
+            
+            CONTROL = {F = 0, B = 0, L = 0, R = 0, Q = 0, E = 0}
+            lCONTROL = {F = 0, B = 0, L = 0, R = 0, Q = 0, E = 0}
+            SPEED = 0
+            if BG then BG:destroy() end
+            if BV then BV:destroy() end
+            cmdlp.Character.Humanoid.PlatformStand = false
+        end)
+    end
+    
+    FLY()
+end
+
+-- Stop flying function
+local function stopFlying()
+    FLYING = false
+    updateGUIStatus(false)
+end
+
+-- Start flying function
+local function startFlying()
+    sFLY(true)
+    updateGUIStatus(true)
+end
+
+-- Keyboard controls for movement
+cmdm.KeyDown:connect(function(KEY)
+    if KEY:lower() == 'w' then
+        CONTROL.F = speedofthevfly
+    elseif KEY:lower() == 's' then
+        CONTROL.B = -speedofthevfly
+    elseif KEY:lower() == 'a' then
+        CONTROL.L = -speedofthevfly
+    elseif KEY:lower() == 'd' then
+        CONTROL.R = speedofthevfly
+    elseif KEY:lower() == 'y' then
+        CONTROL.Q = speedofthevfly * 2
+    elseif KEY:lower() == 't' then
+        CONTROL.E = -speedofthevfly * 2
+    end
+end)
+
+cmdm.KeyUp:connect(function(KEY)
+    if KEY:lower() == 'w' then
+        CONTROL.F = 0
+    elseif KEY:lower() == 's' then
+        CONTROL.B = 0
+    elseif KEY:lower() == 'a' then
+        CONTROL.L = 0
+    elseif KEY:lower() == 'd' then
+        CONTROL.R = 0
+    elseif KEY:lower() == 'y' then
+        CONTROL.Q = 0
+    elseif KEY:lower() == 't' then
+        CONTROL.E = 0
+    end
+end)
+
+-- Toggle with U key
+UserInputService.InputBegan:Connect(function(input, gameProcessed)
+    if gameProcessed then return end
+    
+    if input.KeyCode == Enum.KeyCode.U then
+        if FLYING then
+            stopFlying()
+            game.StarterGui:SetCore("SendNotification", {
+                Title = "Vehicle Fly Disabled",
+                Text = "Press U to enable",
+                Duration = 2
+            })
+        else
+            startFlying()
+            game.StarterGui:SetCore("SendNotification", {
+                Title = "Vehicle Fly Enabled",
+                Text = "Press U to disable",
+                Duration = 2
+            })
+        end
+    end
+end)
+
+-- Monitor seat changes
+local function setupSeatMonitoring()
+    if seatConnection then
+        seatConnection:Disconnect()
+    end
+    
+    seatConnection = RunService.Heartbeat:Connect(function()
+        if cmdlp.Character and cmdlp.Character:FindFirstChild("Humanoid") then
+            local humanoid = cmdlp.Character.Humanoid
+            local isInSeat = humanoid.SeatPart ~= nil
+            
+            -- If seat status changed while flying
+            if FLYING and isInSeat ~= wasInSeat then
+                -- Stop flying
+                stopFlying()
+                wait(0.1)
+                -- Restart flying
+                startFlying()
+                
+                game.StarterGui:SetCore("SendNotification", {
+                    Title = "Vehicle Fly Restarted",
+                    Text = isInSeat and "Entered vehicle - fly restarted" or "Exited vehicle - fly restarted",
+                    Duration = 2
+                })
+            end
+            
+            wasInSeat = isInSeat
+        end
+    end)
+end
+
+-- Initialize
+createGUI()
+setupSeatMonitoring()
+
+-- Initial notification
+game.StarterGui:SetCore("SendNotification", {
+    Title = "Vehicle Fly Script Loaded",
+    Text = "Press U to toggle fly\nAuto-restarts when entering/exiting vehicles",
+    Duration = 5
+})

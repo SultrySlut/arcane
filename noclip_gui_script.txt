@@ -1,0 +1,280 @@
+-- Noclip GUI Toggle Script
+-- Creates a draggable GUI with toggle button for noclip functionality
+
+local Players = game:GetService("Players")
+local RunService = game:GetService("RunService")
+local UserInputService = game:GetService("UserInputService")
+local TweenService = game:GetService("TweenService")
+
+local player = Players.LocalPlayer
+local playerGui = player:WaitForChild("PlayerGui")
+
+-- State variables
+local noclipEnabled = false
+local noclipConnection = nil
+local character = nil
+local humanoid = nil
+
+-- GUI Configuration
+local GUI_SIZE = UDim2.new(0, 200, 0, 80)
+local GUI_POSITION = UDim2.new(0, 10, 0, 10)
+
+-- Function to get current character
+local function updateCharacter()
+    character = player.Character
+    if character then
+        humanoid = character:WaitForChild("Humanoid")
+    end
+end
+
+-- Function to enable noclip
+local function enableNoclip()
+    if noclipConnection then return end -- Already enabled
+    
+    noclipConnection = RunService.Stepped:Connect(function()
+        if not character then
+            updateCharacter()
+            return
+        end
+        
+        for _, v in pairs(character:GetDescendants()) do
+            if v:IsA("BasePart") then
+                v.CanCollide = false
+            end
+        end
+    end)
+    
+    noclipEnabled = true
+    print("[Noclip] Enabled")
+end
+
+-- Function to disable noclip
+local function disableNoclip()
+    if noclipConnection then
+        noclipConnection:Disconnect()
+        noclipConnection = nil
+    end
+    
+    -- Re-enable collisions
+    if character then
+        for _, v in pairs(character:GetDescendants()) do
+            if v:IsA("BasePart") and v.Name ~= "HumanoidRootPart" then
+                v.CanCollide = true
+            end
+        end
+    end
+    
+    noclipEnabled = false
+    print("[Noclip] Disabled")
+end
+
+-- Function to toggle noclip
+local function toggleNoclip()
+    if noclipEnabled then
+        disableNoclip()
+    else
+        enableNoclip()
+    end
+end
+
+-- Create the GUI
+local function createGUI()
+    -- Remove existing GUI if it exists
+    local existingGui = playerGui:FindFirstChild("NoclipGUI")
+    if existingGui then
+        existingGui:Destroy()
+    end
+    
+    -- Main GUI
+    local screenGui = Instance.new("ScreenGui")
+    screenGui.Name = "NoclipGUI"
+    screenGui.ResetOnSpawn = false
+    screenGui.Parent = playerGui
+    
+    -- Main Frame
+    local mainFrame = Instance.new("Frame")
+    mainFrame.Name = "MainFrame"
+    mainFrame.Size = GUI_SIZE
+    mainFrame.Position = GUI_POSITION
+    mainFrame.BackgroundColor3 = Color3.fromRGB(45, 45, 45)
+    mainFrame.BorderSizePixel = 0
+    mainFrame.Active = true
+    mainFrame.Draggable = true
+    mainFrame.Parent = screenGui
+    
+    -- Add rounded corners
+    local corner = Instance.new("UICorner")
+    corner.CornerRadius = UDim.new(0, 8)
+    corner.Parent = mainFrame
+    
+    -- Add subtle shadow/border effect
+    local stroke = Instance.new("UIStroke")
+    stroke.Color = Color3.fromRGB(70, 70, 70)
+    stroke.Thickness = 1
+    stroke.Parent = mainFrame
+    
+    -- Title Label
+    local titleLabel = Instance.new("TextLabel")
+    titleLabel.Name = "TitleLabel"
+    titleLabel.Size = UDim2.new(1, 0, 0, 25)
+    titleLabel.Position = UDim2.new(0, 0, 0, 5)
+    titleLabel.BackgroundTransparency = 1
+    titleLabel.Text = "NOCLIP CONTROL"
+    titleLabel.TextColor3 = Color3.fromRGB(255, 255, 255)
+    titleLabel.TextScaled = true
+    titleLabel.Font = Enum.Font.GothamBold
+    titleLabel.Parent = mainFrame
+    
+    -- Toggle Button
+    local toggleButton = Instance.new("TextButton")
+    toggleButton.Name = "ToggleButton"
+    toggleButton.Size = UDim2.new(0.8, 0, 0, 35)
+    toggleButton.Position = UDim2.new(0.1, 0, 0, 40)
+    toggleButton.BackgroundColor3 = Color3.fromRGB(220, 50, 47) -- Red for OFF
+    toggleButton.BorderSizePixel = 0
+    toggleButton.Text = "OFF"
+    toggleButton.TextColor3 = Color3.fromRGB(255, 255, 255)
+    toggleButton.TextScaled = true
+    toggleButton.Font = Enum.Font.GothamBold
+    toggleButton.Parent = mainFrame
+    
+    -- Button corner
+    local buttonCorner = Instance.new("UICorner")
+    buttonCorner.CornerRadius = UDim.new(0, 6)
+    buttonCorner.Parent = toggleButton
+    
+    -- Status Indicator (small dot)
+    local statusDot = Instance.new("Frame")
+    statusDot.Name = "StatusDot"
+    statusDot.Size = UDim2.new(0, 8, 0, 8)
+    statusDot.Position = UDim2.new(1, -15, 0, 8)
+    statusDot.BackgroundColor3 = Color3.fromRGB(220, 50, 47) -- Red for OFF
+    statusDot.BorderSizePixel = 0
+    statusDot.Parent = mainFrame
+    
+    local dotCorner = Instance.new("UICorner")
+    dotCorner.CornerRadius = UDim.new(0.5, 0)
+    dotCorner.Parent = statusDot
+    
+    -- Function to update button appearance
+    local function updateButtonAppearance()
+        local tweenInfo = TweenInfo.new(0.3, Enum.EasingStyle.Quad, Enum.EasingDirection.Out)
+        
+        if noclipEnabled then
+            -- ON state - Green
+            local buttonTween = TweenService:Create(toggleButton, tweenInfo, {
+                BackgroundColor3 = Color3.fromRGB(46, 204, 113)
+            })
+            local dotTween = TweenService:Create(statusDot, tweenInfo, {
+                BackgroundColor3 = Color3.fromRGB(46, 204, 113)
+            })
+            
+            buttonTween:Play()
+            dotTween:Play()
+            toggleButton.Text = "ON"
+        else
+            -- OFF state - Red
+            local buttonTween = TweenService:Create(toggleButton, tweenInfo, {
+                BackgroundColor3 = Color3.fromRGB(220, 50, 47)
+            })
+            local dotTween = TweenService:Create(statusDot, tweenInfo, {
+                BackgroundColor3 = Color3.fromRGB(220, 50, 47)
+            })
+            
+            buttonTween:Play()
+            dotTween:Play()
+            toggleButton.Text = "OFF"
+        end
+    end
+    
+    -- Button hover effects
+    toggleButton.MouseEnter:Connect(function()
+        local hoverTween = TweenService:Create(toggleButton, TweenInfo.new(0.2), {
+            Size = UDim2.new(0.85, 0, 0, 37)
+        })
+        hoverTween:Play()
+    end)
+    
+    toggleButton.MouseLeave:Connect(function()
+        local hoverTween = TweenService:Create(toggleButton, TweenInfo.new(0.2), {
+            Size = UDim2.new(0.8, 0, 0, 35)
+        })
+        hoverTween:Play()
+    end)
+    
+    -- Button click functionality
+    toggleButton.MouseButton1Click:Connect(function()
+        toggleNoclip()
+        updateButtonAppearance()
+    end)
+    
+    -- Keyboard toggle (Comma key)
+    UserInputService.InputBegan:Connect(function(input, gameProcessed)
+        if gameProcessed then return end
+        
+        if input.KeyCode == Enum.KeyCode.Comma then
+            toggleNoclip()
+            updateButtonAppearance()
+        end
+    end)
+    
+    -- Initial button state
+    updateButtonAppearance()
+    
+    print("[Noclip GUI] Created successfully!")
+    print("- Click the button to toggle noclip")
+    print("- Press ',' (comma) key to toggle")
+    print("- Drag the GUI to move it around")
+    
+    return screenGui
+end
+
+-- Handle character respawning
+local function onCharacterAdded(newCharacter)
+    character = newCharacter
+    humanoid = character:WaitForChild("Humanoid")
+    
+    -- If noclip was enabled before respawn, re-enable it
+    if noclipEnabled then
+        task.wait(0.5) -- Wait for character to fully load
+        enableNoclip()
+    end
+end
+
+-- Connect character events
+player.CharacterAdded:Connect(onCharacterAdded)
+if player.Character then
+    onCharacterAdded(player.Character)
+end
+
+-- Create the GUI
+local gui = createGUI()
+
+-- Global functions for external control
+_G.ToggleNoclip = toggleNoclip
+_G.EnableNoclip = enableNoclip
+_G.DisableNoclip = disableNoclip
+_G.NoclipStatus = function()
+    print("Noclip Status:", noclipEnabled and "ENABLED" or "DISABLED")
+    return noclipEnabled
+end
+
+-- Cleanup function
+_G.DestroyNoclipGUI = function()
+    if gui then gui:Destroy() end
+    disableNoclip()
+    print("[Noclip GUI] Destroyed")
+end
+
+print("\n=== Noclip GUI Controls ===")
+print("GUI Controls:")
+print("- Click button to toggle")
+print("- Press ',' key to toggle")
+print("- Drag GUI to move")
+print("\nScript Controls:")
+print("- _G.ToggleNoclip()")
+print("- _G.EnableNoclip()")  
+print("- _G.DisableNoclip()")
+print("- _G.NoclipStatus()")
+print("- _G.DestroyNoclipGUI()")
+print("==========================")

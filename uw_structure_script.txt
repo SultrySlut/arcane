@@ -1,0 +1,273 @@
+-- UW Structure Highlighter Script
+local Players = game:GetService("Players")
+local RunService = game:GetService("RunService")
+
+local player = Players.LocalPlayer
+local DETECTION_RADIUS = 2000
+local HERB_RGB = {56, 86, 156}
+
+-- Storage for removed items
+local removedItems = {}
+
+-- Function to get player position
+local function getPlayerPosition()
+    if player.Character and player.Character:FindFirstChild("HumanoidRootPart") then
+        return player.Character.HumanoidRootPart.Position
+    end
+    return nil
+end
+
+-- Function to calculate distance (ignoring Y axis)
+local function calculateDistance(pos1, pos2)
+    local dx = pos1.X - pos2.X
+    local dz = pos1.Z - pos2.Z
+    return math.sqrt(dx*dx + dz*dz)
+end
+
+-- Function to check if an item has the "Open" property inside it
+local function hasOpenProperty(item)
+    -- Look inside the item for something named "Open"
+    for _, child in pairs(item:GetChildren()) do
+        if child.Name == "Open" then
+            return true
+        end
+    end
+    return false
+end
+
+-- Function to remove all indicators from an item
+local function removeIndicators(item)
+    local removed = false
+    
+    -- Remove from BasePart directly
+    if item:IsA("BasePart") then
+        local spotlight = item:FindFirstChild("ItemSpotlight")
+        if spotlight then 
+            spotlight:Destroy() 
+            removed = true
+        end
+        
+        local outline = item:FindFirstChild("ItemOutline")
+        if outline then 
+            outline:Destroy() 
+            removed = true
+        end
+        
+        local indicatorGui = item:FindFirstChild("ItemIndicator")
+        if indicatorGui then 
+            indicatorGui:Destroy() 
+            removed = true
+        end
+    end
+    
+    -- Remove from Model (check PrimaryPart and all descendants)
+    if item:IsA("Model") then
+        for _, part in pairs(item:GetDescendants()) do
+            if part:IsA("BasePart") then
+                local spotlight = part:FindFirstChild("ItemSpotlight")
+                if spotlight then 
+                    spotlight:Destroy() 
+                    removed = true
+                end
+                
+                local outline = part:FindFirstChild("ItemOutline")
+                if outline then 
+                    outline:Destroy() 
+                    removed = true
+                end
+                
+                local indicatorGui = part:FindFirstChild("ItemIndicator")
+                if indicatorGui then 
+                    indicatorGui:Destroy() 
+                    removed = true
+                end
+            end
+        end
+    end
+    
+    if removed then
+        -- Add to removed items so it won't be re-highlighted
+        removedItems[item] = true
+        print("Successfully removed indicators from opened chest:", item.Name)
+    else
+        print("No indicators found to remove from:", item.Name)
+    end
+end
+
+-- Function to add spotlight to object (works on Models and BaseParts)
+local function addSpotlight(object)
+    if object:IsA("BasePart") and not object:FindFirstChild("ItemSpotlight") then
+        local spotlight = Instance.new("SpotLight")
+        spotlight.Name = "ItemSpotlight"
+        spotlight.Brightness = 80
+        spotlight.Face = Enum.NormalId.Top
+        spotlight.Parent = object
+    elseif object:IsA("Model") then
+        local primaryPart = object.PrimaryPart or object:FindFirstChildOfClass("BasePart")
+        if primaryPart and not primaryPart:FindFirstChild("ItemSpotlight") then
+            local spotlight = Instance.new("SpotLight")
+            spotlight.Name = "ItemSpotlight"
+            spotlight.Brightness = 80
+            spotlight.Face = Enum.NormalId.Top
+            spotlight.Parent = primaryPart
+        end
+    end
+end
+
+-- Function to add outline to object (works on Models and BaseParts)
+local function addOutline(object)
+    if object:IsA("BasePart") and not object:FindFirstChild("ItemOutline") then
+        local selectionBox = Instance.new("SelectionBox")
+        selectionBox.Name = "ItemOutline"
+        selectionBox.Adornee = object
+        selectionBox.Color3 = Color3.fromRGB(255, 255, 255)
+        selectionBox.Parent = object
+    elseif object:IsA("Model") then
+        for _, part in pairs(object:GetDescendants()) do
+            if part:IsA("BasePart") and not part:FindFirstChild("ItemOutline") then
+                local selectionBox = Instance.new("SelectionBox")
+                selectionBox.Name = "ItemOutline"
+                selectionBox.Adornee = part
+                selectionBox.Color3 = Color3.fromRGB(255, 255, 255)
+                selectionBox.Parent = part
+            end
+        end
+    end
+end
+
+-- Function to add text indicator to object (works on Models and BaseParts)
+local function addTextIndicator(object, text)
+    local function createIndicator(part, itemType)
+        if not part:FindFirstChild("ItemIndicator") then
+            local indicator = Instance.new("BillboardGui")
+            indicator.Name = "ItemIndicator"
+            indicator.Size = UDim2.new(0, 200, 0, 100)
+            indicator.StudsOffset = Vector3.new(0, 10, 0)
+            indicator.AlwaysOnTop = true
+            indicator.Parent = part
+            
+            local frame = Instance.new("Frame")
+            frame.Name = "Frame"
+            frame.Size = UDim2.new(1, 0, 1, 0)
+            frame.BackgroundTransparency = 0.3
+            frame.BackgroundColor3 = Color3.fromRGB(20, 20, 20)
+            frame.BorderSizePixel = 0
+            frame.Parent = indicator
+            
+            local frameCorner = Instance.new("UICorner")
+            frameCorner.CornerRadius = UDim.new(0, 8)
+            frameCorner.Parent = frame
+            
+            local iconText = Instance.new("TextLabel")
+            iconText.Name = "IconText"
+            iconText.Size = UDim2.new(1, 0, 0.6, 0)
+            iconText.Position = UDim2.new(0, 0, 0, 5)
+            iconText.BackgroundTransparency = 1
+            iconText.TextScaled = true
+            iconText.Font = Enum.Font.SourceSansBold
+            iconText.Parent = frame
+            
+            local typeText = Instance.new("TextLabel")
+            typeText.Name = "TypeText"
+            typeText.Size = UDim2.new(1, 0, 0.4, 0)
+            typeText.Position = UDim2.new(0, 0, 0.6, 0)
+            typeText.BackgroundTransparency = 1
+            typeText.Text = text
+            typeText.TextScaled = true
+            typeText.Font = Enum.Font.SourceSans
+            typeText.Parent = frame
+            
+            -- Different colors and effects for different types
+            if itemType == "CHEST" then
+                iconText.Text = "📦 CHEST"
+                iconText.TextColor3 = Color3.fromRGB(255, 215, 0) -- Gold
+                typeText.TextColor3 = Color3.fromRGB(255, 255, 255) -- White
+                frame.BackgroundColor3 = Color3.fromRGB(40, 30, 10) -- Dark gold background
+                
+            elseif itemType == "HERB" then
+                iconText.Text = "🌿 HERB"
+                iconText.TextColor3 = Color3.fromRGB(0, 255, 127) -- Spring green
+                typeText.TextColor3 = Color3.fromRGB(255, 255, 255) -- White
+                frame.BackgroundColor3 = Color3.fromRGB(10, 40, 20) -- Dark green background
+            end
+        end
+    end
+    
+    if object:IsA("BasePart") then
+        createIndicator(object, text)
+    elseif object:IsA("Model") then
+        local primaryPart = object.PrimaryPart or object:FindFirstChildOfClass("BasePart")
+        if primaryPart then
+            createIndicator(primaryPart, text)
+        end
+    end
+end
+
+-- Main detection function
+local function detectStructures()
+    local playerPos = getPlayerPosition()
+    if not playerPos then return end
+    
+    local workspace = game.Workspace
+    local map = workspace:FindFirstChild("Map")
+    if not map then return end
+    
+    local seaContent = map:FindFirstChild("SeaContent")
+    if not seaContent then return end
+    
+    -- Look for UWStructures
+    for _, uwStructure in pairs(seaContent:GetChildren()) do
+        if uwStructure.Name:find("UWStructure") then
+            local structurePos = uwStructure:GetPivot().Position
+            local distance = calculateDistance(playerPos, structurePos)
+            
+            if distance <= DETECTION_RADIUS then
+                -- Process everything in Chests folder
+                local chests = uwStructure:FindFirstChild("Chests")
+                if chests then
+                    for _, item in pairs(chests:GetChildren()) do
+                        -- Check if chest has "Open" property and remove indicators if it does
+                        if hasOpenProperty(item) then
+                            if not removedItems[item] then
+                                removeIndicators(item)
+                            end
+                        else
+                            -- Only highlight if not removed and doesn't have Open property
+                            if not removedItems[item] then
+                                addSpotlight(item)
+                                addOutline(item)
+                                addTextIndicator(item, "CHEST")
+                            end
+                        end
+                    end
+                end
+                
+                -- Process only specific Herbs in Details folder
+                local details = uwStructure:FindFirstChild("Details")
+                if details then
+                    for _, item in pairs(details:GetChildren()) do
+                        if item.Name == "Herb" and item:IsA("BasePart") then
+                            local color = item.Color
+                            local r, g, b = math.floor(color.R * 255), math.floor(color.G * 255), math.floor(color.B * 255)
+                            if r == HERB_RGB[1] and g == HERB_RGB[2] and b == HERB_RGB[3] then
+                                -- Only highlight if not removed
+                                if not removedItems[item] then
+                                    addSpotlight(item)
+                                    addOutline(item)
+                                    addTextIndicator(item, "HERB")
+                                end
+                            end
+                        end
+                    end
+                end
+            end
+        end
+    end
+end
+
+-- Run detection every 2 seconds
+RunService.Heartbeat:Connect(function()
+    if tick() % 2 < RunService.Heartbeat:Wait() then
+        detectStructures()
+    end
+end)

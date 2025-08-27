@@ -1,0 +1,170 @@
+-- NoFog & Fullbright Script
+-- Automatically enables nofog and fullbright with status checking and auto-correction
+
+local Lighting = game:GetService("Lighting")
+local RunService = game:GetService("RunService")
+
+-- Configuration
+local NOFOG_DISTANCE = 100000
+local FULLBRIGHT_SETTINGS = {
+    Brightness = 1,
+    ClockTime = 12,
+    FogEnd = 786543,
+    GlobalShadows = false,
+    Ambient = Color3.fromRGB(178, 178, 178)
+}
+
+-- Global state variables
+_G.NoFogFullbrightEnabled = true
+_G.NoFogFullbrightConnection = nil
+
+-- Function to apply NoFog
+local function applyNoFog()
+    Lighting.FogEnd = NOFOG_DISTANCE
+    
+    -- Remove any Atmosphere objects
+    for _, v in pairs(Lighting:GetDescendants()) do
+        if v:IsA("Atmosphere") then
+            v:Destroy()
+        end
+    end
+end
+
+-- Function to apply Fullbright
+local function applyFullbright()
+    for property, value in pairs(FULLBRIGHT_SETTINGS) do
+        if Lighting[property] ~= value then
+            Lighting[property] = value
+        end
+    end
+end
+
+-- Function to check and maintain settings
+local function checkAndMaintain()
+    if not _G.NoFogFullbrightEnabled then
+        return
+    end
+    
+    -- Check NoFog
+    if Lighting.FogEnd < NOFOG_DISTANCE then
+        print("[NoFog] Fog distance reset detected, reapplying...")
+        applyNoFog()
+    end
+    
+    -- Check Fullbright settings
+    for property, expectedValue in pairs(FULLBRIGHT_SETTINGS) do
+        local currentValue = Lighting[property]
+        local needsUpdate = false
+        
+        if property == "Ambient" then
+            -- Special handling for Color3 comparison
+            if currentValue.R ~= expectedValue.R or 
+               currentValue.G ~= expectedValue.G or 
+               currentValue.B ~= expectedValue.B then
+                needsUpdate = true
+            end
+        else
+            if currentValue ~= expectedValue then
+                needsUpdate = true
+            end
+        end
+        
+        if needsUpdate then
+            print(string.format("[Fullbright] %s changed from expected value, reapplying...", property))
+            Lighting[property] = expectedValue
+        end
+    end
+end
+
+-- Function to start the script
+local function startNoFogFullbright()
+    if _G.NoFogFullbrightConnection then
+        _G.NoFogFullbrightConnection:Disconnect()
+    end
+    
+    print("[NoFog & Fullbright] Enabling...")
+    
+    -- Initial application
+    applyNoFog()
+    applyFullbright()
+    
+    -- Set up monitoring connection
+    _G.NoFogFullbrightEnabled = true
+    _G.NoFogFullbrightConnection = RunService.Heartbeat:Connect(checkAndMaintain)
+    
+    print("[NoFog & Fullbright] Enabled! Monitoring for changes...")
+    print("- NoFog: Active (Fog distance set to " .. NOFOG_DISTANCE .. ")")
+    print("- Fullbright: Active")
+    print("- Auto-correction: Enabled")
+end
+
+-- Function to stop the script
+local function stopNoFogFullbright()
+    _G.NoFogFullbrightEnabled = false
+    if _G.NoFogFullbrightConnection then
+        _G.NoFogFullbrightConnection:Disconnect()
+        _G.NoFogFullbrightConnection = nil
+    end
+    print("[NoFog & Fullbright] Disabled")
+end
+
+-- Function to check current status
+local function getStatus()
+    local status = {
+        enabled = _G.NoFogFullbrightEnabled or false,
+        nofog_active = Lighting.FogEnd >= NOFOG_DISTANCE,
+        fullbright_settings = {}
+    }
+    
+    for property, expectedValue in pairs(FULLBRIGHT_SETTINGS) do
+        local currentValue = Lighting[property]
+        if property == "Ambient" then
+            status.fullbright_settings[property] = {
+                current = string.format("RGB(%.0f,%.0f,%.0f)", currentValue.R*255, currentValue.G*255, currentValue.B*255),
+                expected = string.format("RGB(%.0f,%.0f,%.0f)", expectedValue.R*255, expectedValue.G*255, expectedValue.B*255),
+                correct = (currentValue.R == expectedValue.R and currentValue.G == expectedValue.G and currentValue.B == expectedValue.B)
+            }
+        else
+            status.fullbright_settings[property] = {
+                current = tostring(currentValue),
+                expected = tostring(expectedValue),
+                correct = (currentValue == expectedValue)
+            }
+        end
+    end
+    
+    return status
+end
+
+-- Function to print status
+local function printStatus()
+    local status = getStatus()
+    
+    print("=== NoFog & Fullbright Status ===")
+    print("Script Enabled:", status.enabled)
+    print("NoFog Active:", status.nofog_active, "(FogEnd:", Lighting.FogEnd .. ")")
+    print("Fullbright Settings:")
+    
+    for property, info in pairs(status.fullbright_settings) do
+        local statusIcon = info.correct and "✓" or "✗"
+        print(string.format("  %s %s: %s (Expected: %s)", statusIcon, property, info.current, info.expected))
+    end
+    print("===============================")
+end
+
+-- Auto-start the script
+startNoFogFullbright()
+
+-- Expose control functions globally for manual control
+_G.StartNoFogFullbright = startNoFogFullbright
+_G.StopNoFogFullbright = stopNoFogFullbright
+_G.NoFogFullbrightStatus = printStatus
+
+-- Print initial status after a brief delay to let everything settle
+task.wait(1)
+printStatus()
+
+print("\nManual Controls:")
+print("- _G.StartNoFogFullbright() -- Start/restart the script")
+print("- _G.StopNoFogFullbright() -- Stop the script") 
+print("- _G.NoFogFullbrightStatus() -- Check current status")

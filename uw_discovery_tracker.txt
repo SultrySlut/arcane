@@ -1,0 +1,375 @@
+-- UW Structure Discovery Tracker Script
+-- Continuously monitors and places indicators on UW Structures with discovery status
+
+local Players = game:GetService('Players')
+local Workspace = game:GetService('Workspace')
+local LocalPlayer = Players.LocalPlayer
+
+-- Configuration
+local DETECTION_RANGE = 20000 -- Studs radius
+local UPDATE_RATE = 0.5 -- How often to scan for new UW Structures and verify indicators
+local DISTANCE_UPDATE_RATE = 0.1 -- How often to update distance text
+
+-- Storage for tracked UW Structures
+local trackedStructures = {}
+
+-- Get position from UW Structure (handles Models and Parts)
+local function getStructurePosition(uwStructure)
+    if uwStructure:IsA('Model') then
+        local primaryPart = uwStructure.PrimaryPart
+        if primaryPart then
+            return primaryPart.Position
+        else
+            -- Try to find any part in the model
+            local part = uwStructure:FindFirstChildWhichIsA('BasePart', true)
+            if part then
+                return part.Position
+            end
+        end
+    elseif uwStructure:IsA('BasePart') then
+        return uwStructure.Position
+    end
+    return nil
+end
+
+-- Get the appropriate parent for the BillboardGui
+local function getGuiParent(uwStructure)
+    if uwStructure:IsA('Model') then
+        -- For models, try to use PrimaryPart or find first BasePart
+        if uwStructure.PrimaryPart then
+            return uwStructure.PrimaryPart
+        else
+            local part = uwStructure:FindFirstChildWhichIsA('BasePart', true)
+            if part then
+                return part
+            end
+        end
+    elseif uwStructure:IsA('BasePart') then
+        -- For parts, use the part directly
+        return uwStructure
+    end
+    return nil
+end
+
+-- Check discovery progress for structure
+local function getDiscoveryProgress(uwStructure)
+    local discoverers = uwStructure:FindFirstChild('Discoverers')
+    local totalChests = uwStructure:FindFirstChild('TotalChests')
+    
+    if not totalChests then
+        return {
+            discovered = false,
+            chestsOpened = 0,
+            totalChests = 0,
+            percentage = 0,
+            status = "NO DATA"
+        }
+    end
+    
+    local totalChestCount = totalChests.Value or 0
+    local chestsOpened = 0
+    
+    if discoverers then
+        -- Sum up all the chest values from discoverers
+        for _, discoverer in pairs(discoverers:GetChildren()) do
+            if discoverer:IsA("IntValue") or discoverer:IsA("NumberValue") then
+                chestsOpened = chestsOpened + (discoverer.Value or 0)
+            end
+        end
+    end
+    
+    local percentage = totalChestCount > 0 and (chestsOpened / totalChestCount) * 100 or 0
+    local discovered = chestsOpened > 0
+    
+    local status = "UNCLAIMED"
+    if percentage >= 100 then
+        status = "COMPLETED"
+    elseif discovered then
+        status = "IN PROGRESS"
+    end
+    
+    return {
+        discovered = discovered,
+        chestsOpened = chestsOpened,
+        totalChests = totalChestCount,
+        percentage = percentage,
+        status = status
+    }
+end
+
+-- Check if indicator exists on the structure
+local function hasIndicator(uwStructure)
+    local guiParent = getGuiParent(uwStructure)
+    if guiParent then
+        return guiParent:FindFirstChild('UWStructureIndicator') ~= nil
+    end
+    return false
+end
+
+-- Create discovery indicator directly on UW Structure
+local function createIndicator(uwStructure)
+    local guiParent = getGuiParent(uwStructure)
+    if not guiParent then
+        return nil
+    end
+
+    -- Check if indicator already exists
+    local existingGui = guiParent:FindFirstChild('UWStructureIndicator')
+    if existingGui then
+        return {
+            Gui = existingGui,
+            DistanceLabel = existingGui:FindFirstChild('Frame'):FindFirstChild('DistanceText'),
+            StatusLabel = existingGui:FindFirstChild('Frame'):FindFirstChild('StatusText'),
+            ProgressLabel = existingGui:FindFirstChild('Frame'):FindFirstChild('ProgressText'),
+            Frame = existingGui:FindFirstChild('Frame'),
+            UWStructure = uwStructure,
+            GuiParent = guiParent,
+        }
+    end
+
+    local BillboardGui = Instance.new('BillboardGui')
+    BillboardGui.Name = 'UWStructureIndicator'
+    BillboardGui.Size = UDim2.new(0, 220, 0, 140)
+    BillboardGui.StudsOffset = Vector3.new(0, 15, 0)
+    BillboardGui.AlwaysOnTop = true
+    BillboardGui.Parent = guiParent
+
+    local Frame = Instance.new('Frame')
+    Frame.Name = 'Frame'
+    Frame.Size = UDim2.new(1, 0, 1, 0)
+    Frame.BackgroundTransparency = 0.3
+    Frame.BackgroundColor3 = Color3.fromRGB(20, 20, 20)
+    Frame.BorderSizePixel = 0
+    Frame.Parent = BillboardGui
+
+    local FrameCorner = Instance.new('UICorner')
+    FrameCorner.CornerRadius = UDim.new(0, 8)
+    FrameCorner.Parent = Frame
+
+    local IconText = Instance.new('TextLabel')
+    IconText.Name = 'IconText'
+    IconText.Size = UDim2.new(1, 0, 0.25, 0)
+    IconText.Position = UDim2.new(0, 0, 0, 5)
+    IconText.BackgroundTransparency = 1
+    IconText.Text = '🏛️ UW STRUCTURE'
+    IconText.TextColor3 = Color3.fromRGB(100, 200, 255)
+    IconText.TextScaled = true
+    IconText.Font = Enum.Font.SourceSansBold
+    IconText.Parent = Frame
+
+    local DistanceText = Instance.new('TextLabel')
+    DistanceText.Name = 'DistanceText'
+    DistanceText.Size = UDim2.new(1, 0, 0.25, 0)
+    DistanceText.Position = UDim2.new(0, 0, 0.25, 0)
+    DistanceText.BackgroundTransparency = 1
+    DistanceText.Text = '0 studs'
+    DistanceText.TextColor3 = Color3.fromRGB(255, 255, 255)
+    DistanceText.TextScaled = true
+    DistanceText.Font = Enum.Font.SourceSans
+    DistanceText.Parent = Frame
+
+    local StatusText = Instance.new('TextLabel')
+    StatusText.Name = 'StatusText'
+    StatusText.Size = UDim2.new(1, 0, 0.25, 0)
+    StatusText.Position = UDim2.new(0, 0, 0.5, 0)
+    StatusText.BackgroundTransparency = 1
+    StatusText.Text = 'UNCLAIMED'
+    StatusText.TextColor3 = Color3.fromRGB(255, 100, 100) -- Red for unclaimed
+    StatusText.TextScaled = true
+    StatusText.Font = Enum.Font.SourceSansBold
+    StatusText.Parent = Frame
+
+    local ProgressText = Instance.new('TextLabel')
+    ProgressText.Name = 'ProgressText'
+    ProgressText.Size = UDim2.new(1, 0, 0.25, 0)
+    ProgressText.Position = UDim2.new(0, 0, 0.75, 0)
+    ProgressText.BackgroundTransparency = 1
+    ProgressText.Text = '0/0 Chests (0%)'
+    ProgressText.TextColor3 = Color3.fromRGB(200, 200, 200)
+    ProgressText.TextScaled = true
+    ProgressText.Font = Enum.Font.SourceSans
+    ProgressText.Parent = Frame
+
+    return {
+        Gui = BillboardGui,
+        DistanceLabel = DistanceText,
+        StatusLabel = StatusText,
+        ProgressLabel = ProgressText,
+        Frame = Frame,
+        UWStructure = uwStructure,
+        GuiParent = guiParent,
+    }
+end
+
+-- Update indicator based on discovery progress
+local function updateIndicatorStatus(indicator)
+    local progress = getDiscoveryProgress(indicator.UWStructure)
+    
+    -- Update status text and colors
+    if progress.status == "COMPLETED" then
+        indicator.StatusLabel.Text = 'COMPLETED'
+        indicator.StatusLabel.TextColor3 = Color3.fromRGB(100, 255, 100) -- Bright green
+        indicator.Frame.BackgroundColor3 = Color3.fromRGB(20, 40, 20) -- Green background
+    elseif progress.status == "IN PROGRESS" then
+        indicator.StatusLabel.Text = 'IN PROGRESS'
+        indicator.StatusLabel.TextColor3 = Color3.fromRGB(255, 200, 100) -- Orange/yellow
+        indicator.Frame.BackgroundColor3 = Color3.fromRGB(40, 35, 20) -- Orange background
+    else
+        indicator.StatusLabel.Text = 'UNCLAIMED'
+        indicator.StatusLabel.TextColor3 = Color3.fromRGB(255, 100, 100) -- Red
+        indicator.Frame.BackgroundColor3 = Color3.fromRGB(40, 20, 20) -- Red background
+    end
+    
+    -- Update progress text
+    if progress.totalChests > 0 then
+        indicator.ProgressLabel.Text = string.format('%d/%d Chests (%.1f%%)', 
+            progress.chestsOpened, progress.totalChests, progress.percentage)
+        
+        -- Color progress text based on percentage
+        if progress.percentage >= 100 then
+            indicator.ProgressLabel.TextColor3 = Color3.fromRGB(100, 255, 100) -- Green
+        elseif progress.percentage > 0 then
+            indicator.ProgressLabel.TextColor3 = Color3.fromRGB(255, 200, 100) -- Orange
+        else
+            indicator.ProgressLabel.TextColor3 = Color3.fromRGB(200, 200, 200) -- Gray
+        end
+    else
+        indicator.ProgressLabel.Text = 'No chest data'
+        indicator.ProgressLabel.TextColor3 = Color3.fromRGB(150, 150, 150) -- Gray
+    end
+end
+
+-- Find all UW Structures in SeaContent
+local function findAllUWStructures()
+    local uwStructures = {}
+    
+    local workspace = game.Workspace
+    local map = workspace:FindFirstChild("Map")
+    if not map then return uwStructures end
+    
+    local seaContent = map:FindFirstChild("SeaContent")
+    if not seaContent then return uwStructures end
+
+    -- Look for UW Structures
+    for _, child in pairs(seaContent:GetChildren()) do
+        if child.Name:find("UWStructure") then
+            table.insert(uwStructures, child)
+        end
+    end
+
+    return uwStructures
+end
+
+-- Main scanning loop
+local function scanningLoop()
+    while true do
+        local character = LocalPlayer.Character
+        if character and character:FindFirstChild('HumanoidRootPart') then
+            local playerPos = character.HumanoidRootPart.Position
+
+            -- Find all current UW Structures
+            local currentStructures = findAllUWStructures()
+
+            -- Process each found structure
+            for _, structure in pairs(currentStructures) do
+                local structurePos = getStructurePosition(structure)
+
+                if structurePos then
+                    local distance = (playerPos - structurePos).Magnitude
+
+                    if distance <= DETECTION_RANGE then
+                        -- Check if indicator exists on the structure
+                        if not hasIndicator(structure) then
+                            -- Create or recreate indicator
+                            local indicator = createIndicator(structure)
+                            if indicator then
+                                trackedStructures[structure] = indicator
+                                updateIndicatorStatus(indicator)
+                                print('Created indicator for UW Structure at distance: ' .. math.floor(distance) .. ' studs')
+                            end
+                        elseif not trackedStructures[structure] then
+                            -- Indicator exists but not in our tracking, add it
+                            local guiParent = getGuiParent(structure)
+                            if guiParent then
+                                local existingGui = guiParent:FindFirstChild('UWStructureIndicator')
+                                if existingGui then
+                                    trackedStructures[structure] = {
+                                        Gui = existingGui,
+                                        DistanceLabel = existingGui:FindFirstChild('Frame'):FindFirstChild('DistanceText'),
+                                        StatusLabel = existingGui:FindFirstChild('Frame'):FindFirstChild('StatusText'),
+                                        ProgressLabel = existingGui:FindFirstChild('Frame'):FindFirstChild('ProgressText'),
+                                        Frame = existingGui:FindFirstChild('Frame'),
+                                        UWStructure = structure,
+                                        GuiParent = guiParent,
+                                    }
+                                end
+                            end
+                        end
+
+                        -- Update indicator if it exists
+                        if trackedStructures[structure] and trackedStructures[structure].Gui.Parent then
+                            local indicator = trackedStructures[structure]
+                            indicator.DistanceLabel.Text = math.floor(distance) .. ' studs'
+                            
+                            -- Update discovery status
+                            updateIndicatorStatus(indicator)
+                        end
+                    else
+                        -- Out of range - remove from tracking
+                        if trackedStructures[structure] then
+                            trackedStructures[structure] = nil
+                            print('UW Structure went out of range')
+                        end
+                    end
+                end
+            end
+
+            -- Clean up tracking table for structures that no longer exist
+            for structure, _ in pairs(trackedStructures) do
+                if not structure.Parent then
+                    trackedStructures[structure] = nil
+                end
+            end
+        end
+
+        task.wait(UPDATE_RATE)
+    end
+end
+
+-- Distance and status update loop (runs more frequently)
+local function updateLoop()
+    while true do
+        local character = LocalPlayer.Character
+        if character and character:FindFirstChild('HumanoidRootPart') then
+            local playerPos = character.HumanoidRootPart.Position
+
+            for structure, indicator in pairs(trackedStructures) do
+                if structure and structure.Parent and indicator.Gui and indicator.Gui.Parent then
+                    local structurePos = getStructurePosition(structure)
+                    if structurePos then
+                        local distance = (playerPos - structurePos).Magnitude
+                        indicator.DistanceLabel.Text = math.floor(distance) .. ' studs'
+                        
+                        -- Update discovery status
+                        updateIndicatorStatus(indicator)
+                    end
+                end
+            end
+        end
+
+        task.wait(DISTANCE_UPDATE_RATE)
+    end
+end
+
+-- Start continuous detection
+spawn(scanningLoop)
+spawn(updateLoop)
+
+-- Notification
+game.StarterGui:SetCore('SendNotification', {
+    Title = 'UW Structure Discovery Tracker Active',
+    Text = 'Monitoring discovery status of UW Structures',
+    Duration = 3,
+})
+
+print('UW Structure discovery tracking started - Range: ' .. DETECTION_RANGE .. ' studs')
