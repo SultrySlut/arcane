@@ -63,7 +63,7 @@ local function buildPlatformAtWater(sirenRock, waterPart)
     -- Create roof 60 studs above platform - larger 400x400 size
     local roof = createPart(
         "SirenRockRoof",
-        Vector3.new(1000, 4, 1000), -- Larger roof size
+        Vector3.new(380, 4, 380), -- Larger roof size
         Vector3.new(waterPos.X, waterPos.Y + 64, waterPos.Z), -- Same Y position
         Enum.Material.Concrete,
         "Dark stone grey"
