@@ -1,286 +1,564 @@
 --[[
-	DARK SEA DETECTOR  -  SirenRocks, Hecate's Essence, Prometheus's Acrimony
+	Auto SirenRock Platform + Ship Tunnel  (v4)
 	------------------------------------------------------------------
-	Same indicator style as the SirenRock detector, extended to three targets.
-	Each target type has its own label/colour and its own match rule, so you
-	can add more in TARGETS below.
+	Per SirenRock (Workspace.Map.SeaContent.DarkSea.SirenRock):
+	  GROUND FLOOR  solid slab at the Dark Sealed Chest's resting height,
+	                covering the treasure area (so the chest has ground once
+	                the rock fragments).
+	  TUNNEL        an enclosed corridor (floor, two walls, ceiling) from the
+	                platform edge straight to YOUR SHIP's deck. It is re-aimed
+	                every frame, so it follows the ship wherever it sails.
+	  CHEST CATCHER keeps the sealed chest from sinking through the floor /
+	                tunnel on your screen.
 
-	Matching:
-	  SIREN ROCK   name == "SirenRock"
-	  HECATE       name contains "hecate" (HecateEssence / Hecate's Essence ...),
-	               or a part with a child named "Light" inside the Dark Sea
-	               folder (the server hands exactly such an object to the
-	               HecateEssence remote)
-	  ACRIMONY     name contains "acrimony", or "prometheus" (but not the
-	               MB_Prometheus memory-board note)
+	Ship = Workspace.Boats.<...>Boat whose Owner/OwnerPlayer is you (or whose
+	BoatName starts with your name); falls back to the nearest boat.
+	Deck height is read from the boat's "Deck" part.
 
-	Scanning uses Workspace.DescendantAdded plus one initial sweep, instead of
-	walking the whole workspace twice a second.
-	Unload: getgenv().DarkSeaDetectorStop()
+	Unload: getgenv().SirenRockStop()
 --]]
 
-local Players    = game:GetService("Players")
-local Workspace  = game:GetService("Workspace")
-local StarterGui = game:GetService("StarterGui")
-local LP         = Players.LocalPlayer
+local Players   = game:GetService("Players")
+local Workspace = game:GetService("Workspace")
+local RunService= game:GetService("RunService")
+local StarterGui= game:GetService("StarterGui")
+local PhysicsService = game:GetService("PhysicsService")
+local LP        = Players.LocalPlayer
 
 -- ================= CONFIG =================
-local DETECTION_RANGE      = 20000
-local VERIFY_RATE          = 1.0    -- re-check tracked objects / range this often
-local DISTANCE_UPDATE_RATE = 0.1    -- distance text refresh
-local RESWEEP_EVERY        = 30     -- full workspace sweep this often (safety net), 0 = never
+local DETECTION_RANGE   = 2000
+local SCAN_EVERY        = 2
+local ROCK_NAME         = "SirenRock"
+local ROCK_PATH         = { "Map", "SeaContent", "DarkSea" }
+local CHEST_FOLDER_PATH = { "Map", "Temporary" }
+local BOATS_FOLDER      = "Boats"
+local SHIP_NAME_OVERRIDE= ""       -- force a boat model name (e.g. "C2Z6H3Boat"); "" = auto
 
-local function nameHas(inst, s) return inst.Name:lower():find(s, 1, true) ~= nil end
-local function underDarkSea(inst)
-	local ds = Workspace:FindFirstChild("Map")
-	ds = ds and ds:FindFirstChild("SeaContent")
-	ds = ds and ds:FindFirstChild("DarkSea")
-	return ds ~= nil and inst:IsDescendantOf(ds)
-end
--- items spawn as a Model, a BasePart, or (like the RS.Items templates) a
--- Folder named after the item holding Part0/Part1...
-local function isWorldObject(inst)
-	return inst:IsA("Model") or inst:IsA("BasePart") or inst:IsA("Folder")
-end
+local REMOVE_FRAGMENTABLE = true
 
-local TARGETS = {
-	{
-		key   = "siren",
-		label = "⚠️ SIREN ROCK",
-		color = Color3.fromRGB(255, 100, 100),
-		match = function(inst) return inst.Name == "SirenRock" end,
-	},
-	{
-		key   = "hecate",
-		label = "✨ HECATE'S ESSENCE",
-		color = Color3.fromRGB(190, 120, 255),
-		match = function(inst)
-			if not isWorldObject(inst) then return false end
-			if nameHas(inst, "hecate") then return true end
-			-- structural fallback: a lit pickup in the Dark Sea
-			if inst:IsA("BasePart") and underDarkSea(inst) and inst:FindFirstChild("Light") then
-				return true
-			end
-			return false
-		end,
-	},
-	{
-		key   = "acrimony",
-		label = "🔥 PROMETHEUS'S ACRIMONY",
-		color = Color3.fromRGB(255, 150, 60),
-		match = function(inst)
-			if not isWorldObject(inst) then return false end
-			if nameHas(inst, "acrimony") then return true end
-			if nameHas(inst, "prometheus") and not inst.Name:find("^MB_") then return true end
-			return false
-		end,
-	},
-}
+-- ground floor
+local FLOOR_MARGIN      = 40
+local FLOOR_MIN_SIZE    = 220
+local FLOOR_THICK       = 6
+local FLOOR_DROP        = 0.02
+
+-- roof over the floor
+local BUILD_ROOF        = true
+local ROOF_HEIGHT       = 60
+local BUILD_PILLARS     = true
+
+-- tunnel to the ship
+local BUILD_TUNNEL      = true
+local TUNNEL_WIDTH      = 14
+local TUNNEL_HEIGHT     = 12
+local TUNNEL_THICK      = 1
+local TUNNEL_OVERLAP    = 6        -- how far the tunnel floor pushes onto the deck / platform
+local DECK_PART_NAME    = "Deck"   -- boat part whose top is the walkable deck
+local DECK_LIFT         = 0.3      -- tunnel floor top above the deck top at the ship end
+local TUNNEL_UPDATE     = 0        -- seconds between re-aims (0 = every frame)
+local TUNNEL_TRANSP     = 0.35     -- walls/ceiling transparency so you can see out
+-- The tunnel must never physically touch the ship (it's anchored; overlapping
+-- the hull shoves the boat into the sea). Tunnel parts go in their own
+-- collision group that collides with players but NOT with the ship.
+local TUNNEL_GROUP      = "ArcTunnel"
+local SHIP_GROUP        = "ArcShip"
+local SHIP_END_GAP      = 2        -- studs the tunnel stops short of the deck point
+
+-- chest catcher
+local CATCH_CHESTS      = true
+local SETTLE_MARGIN     = 0.05
+local CLAIM_OWNERSHIP   = true
 -- ==========================================
 
-if getgenv().DarkSeaDetectorRunning then
-	if getgenv().DarkSeaDetectorStop then getgenv().DarkSeaDetectorStop() end
+if getgenv().SirenRockRunning then
+	if getgenv().SirenRockStop then getgenv().SirenRockStop() end
 end
-getgenv().DarkSeaDetectorRunning = true
+getgenv().SirenRockRunning = true
 
-local tracked = {}     -- inst -> {Gui, DistanceLabel, Target, GuiParent}
-local conns = {}
+local processed = {}
+local records   = {}
+local chests    = {}
+local conns     = {}
 local function track(c) table.insert(conns, c); return c end
 
--- ---------- helpers (same as the original detector) ----------
-local function getPosition(inst)
-	if inst:IsA("BasePart") then return inst.Position end
-	if inst:IsA("Model") then
-		if inst.PrimaryPart then return inst.PrimaryPart.Position end
-		local ok, cf = pcall(function() return inst:GetPivot() end)
-		if ok then return cf.Position end
-	end
-	local part = inst:FindFirstChildWhichIsA("BasePart", true)
-	return part and part.Position
+local function notify(t, x, d)
+	pcall(function() StarterGui:SetCore("SendNotification", { Title = t, Text = x, Duration = d or 3 }) end)
 end
-
-local function getGuiParent(inst)
-	if inst:IsA("BasePart") then return inst end
-	if inst:IsA("Model") and inst.PrimaryPart then return inst.PrimaryPart end
-	return inst:FindFirstChildWhichIsA("BasePart", true)
-end
-
-local function whichTarget(inst)
-	for _, t in ipairs(TARGETS) do
-		local ok, hit = pcall(t.match, inst)
-		if ok and hit then
-			-- a container must actually contain geometry to be a world item
-			if inst:IsA("Folder") and not inst:FindFirstChildWhichIsA("BasePart", true) then return nil end
-			return t
-		end
-	end
-	return nil
-end
-
--- skip things that are inside a boat / a character / our own indicators
-local function excluded(inst)
-	if inst:IsA("BillboardGui") or inst:IsA("GuiObject") then return true end
-	local boats = Workspace:FindFirstChild("Boats")
-	if boats and inst:IsDescendantOf(boats) then return true end
-	for _, p in ipairs(Players:GetPlayers()) do
-		if p.Character and inst:IsDescendantOf(p.Character) then return true end
-	end
-	return false
-end
-
--- ---------- indicator (original UI style) ----------
-local function createIndicator(inst, target)
-	local guiParent = getGuiParent(inst)
-	if not guiParent then return nil end
-	local existing = guiParent:FindFirstChild("DarkSeaIndicator")
-	if existing then existing:Destroy() end
-
-	local gui = Instance.new("BillboardGui")
-	gui.Name = "DarkSeaIndicator"
-	gui.Size = UDim2.new(0, 200, 0, 100)
-	gui.StudsOffset = Vector3.new(0, 10, 0)
-	gui.AlwaysOnTop = true
-	gui.Parent = guiParent
-
-	local frame = Instance.new("Frame")
-	frame.Name = "Frame"
-	frame.Size = UDim2.new(1, 0, 1, 0)
-	frame.BackgroundTransparency = 0.3
-	frame.BackgroundColor3 = Color3.fromRGB(20, 20, 20)
-	frame.BorderSizePixel = 0
-	frame.Parent = gui
-	local corner = Instance.new("UICorner")
-	corner.CornerRadius = UDim.new(0, 8)
-	corner.Parent = frame
-
-	local icon = Instance.new("TextLabel")
-	icon.Name = "IconText"
-	icon.Size = UDim2.new(1, 0, 0.4, 0)
-	icon.Position = UDim2.new(0, 0, 0, 5)
-	icon.BackgroundTransparency = 1
-	icon.Text = target.label
-	icon.TextColor3 = target.color
-	icon.TextScaled = true
-	icon.Font = Enum.Font.SourceSansBold
-	icon.Parent = frame
-
-	local dist = Instance.new("TextLabel")
-	dist.Name = "DistanceText"
-	dist.Size = UDim2.new(1, 0, 0.5, 0)
-	dist.Position = UDim2.new(0, 0, 0.4, 0)
-	dist.BackgroundTransparency = 1
-	dist.Text = "0 studs"
-	dist.TextColor3 = Color3.fromRGB(255, 255, 255)
-	dist.TextScaled = true
-	dist.Font = Enum.Font.SourceSans
-	dist.Parent = frame
-
-	return { Gui = gui, DistanceLabel = dist, Target = target, GuiParent = guiParent }
-end
-
-local function notify(title, text, dur)
-	pcall(function() StarterGui:SetCore("SendNotification", { Title = title, Text = text, Duration = dur or 3 }) end)
-end
-
 local function myPos()
 	local ch = LP.Character
 	local hrp = ch and ch:FindFirstChild("HumanoidRootPart")
 	return hrp and hrp.Position
 end
-
--- ---------- tracking ----------
-local function consider(inst)
-	if tracked[inst] or excluded(inst) then return end
-	local target = whichTarget(inst)
-	if not target then return end
-	-- don't tag a child of something we already tag (e.g. parts inside a SirenRock)
-	for other in pairs(tracked) do
-		if inst:IsDescendantOf(other) then return end
-	end
-	local me = myPos()
-	local pos = getPosition(inst)
-	if not (me and pos) then return end
-	local d = (pos - me).Magnitude
-	if d > DETECTION_RANGE then return end
-	local ind = createIndicator(inst, target)
-	if ind then
-		tracked[inst] = ind
-		print(("[DarkSea] %s detected at %d studs"):format(target.label, math.floor(d)))
-		if target.key ~= "siren" then
-			notify(target.label, math.floor(d) .. " studs away", 5)
+local function walk(root, path)
+	local node = root
+	for _, n in ipairs(path) do node = node and node:FindFirstChild(n) end
+	return node
+end
+local function claimSim()
+	if not CLAIM_OWNERSHIP then return end
+	pcall(function()
+		if sethiddenproperty then
+			sethiddenproperty(LP, "MaxSimulationRadius", math.huge)
+			sethiddenproperty(LP, "SimulationRadius", math.huge)
 		end
-	end
+	end)
 end
 
-local function sweep()
-	for _, d in ipairs(Workspace:GetDescendants()) do consider(d) end
+-- ================= COLLISION GROUPS =================
+-- Tunnel <-> Ship = no collision. The ship's collidable parts are moved into
+-- SHIP_GROUP locally, mirroring whatever rules their original group had so
+-- nothing else about the boat's physics changes. Restored on unload.
+local groupsOK = false
+local shipOriginal = {}     -- part -> original CollisionGroup
+local mirrored = {}         -- originalGroup -> true (rules already copied)
+
+local function setupGroups()
+	local ok = pcall(function()
+		local reg = {}
+		for _, g in ipairs(PhysicsService:GetRegisteredCollisionGroups()) do reg[g.name] = true end
+		if not reg[TUNNEL_GROUP] then PhysicsService:RegisterCollisionGroup(TUNNEL_GROUP) end
+		if not reg[SHIP_GROUP] then PhysicsService:RegisterCollisionGroup(SHIP_GROUP) end
+		PhysicsService:CollisionGroupSetCollidable(TUNNEL_GROUP, SHIP_GROUP, false)
+	end)
+	groupsOK = ok
+	if not ok then warn("[SirenRock] collision groups unavailable - tunnel will be non-solid near the ship") end
+	return ok
 end
 
--- new things appearing (essence/acrimony spawn mid-session)
-track(Workspace.DescendantAdded:Connect(function(inst)
-	task.defer(function() if inst.Parent then consider(inst) end end)
-end))
-
--- verify loop: drop gone / out-of-range objects, rebuild lost indicators
-local running = true
-task.spawn(function()
-	local lastSweep = tick()
-	while running do
-		local me = myPos()
-		for inst, ind in pairs(tracked) do
-			if not inst.Parent then
-				pcall(function() ind.Gui:Destroy() end)
-				tracked[inst] = nil
-			elseif me then
-				local pos = getPosition(inst)
-				local d = pos and (pos - me).Magnitude or math.huge
-				if d > DETECTION_RANGE then
-					pcall(function() ind.Gui:Destroy() end)
-					tracked[inst] = nil
-				elseif not ind.Gui.Parent then
-					tracked[inst] = createIndicator(inst, ind.Target) or nil
-				end
+local function mirrorRules(orig)
+	if mirrored[orig] then return end
+	mirrored[orig] = true
+	pcall(function()
+		for _, g in ipairs(PhysicsService:GetRegisteredCollisionGroups()) do
+			local name = g.name
+			if name == TUNNEL_GROUP then
+				PhysicsService:CollisionGroupSetCollidable(SHIP_GROUP, TUNNEL_GROUP, false)
+			elseif name ~= SHIP_GROUP then
+				PhysicsService:CollisionGroupSetCollidable(SHIP_GROUP, name,
+					PhysicsService:CollisionGroupsAreCollidable(orig, name))
 			end
 		end
-		-- re-check in-range candidates we might have missed (cheap: only DescendantAdded misses)
-		if RESWEEP_EVERY > 0 and tick() - lastSweep >= RESWEEP_EVERY then
-			lastSweep = tick()
-			pcall(sweep)
-		end
-		task.wait(VERIFY_RATE)
-	end
-end)
+		PhysicsService:CollisionGroupSetCollidable(SHIP_GROUP, SHIP_GROUP,
+			PhysicsService:CollisionGroupsAreCollidable(orig, orig))
+	end)
+end
 
--- distance text loop
-task.spawn(function()
-	while running do
-		local me = myPos()
-		if me then
-			for inst, ind in pairs(tracked) do
-				if inst.Parent and ind.Gui.Parent then
-					local pos = getPosition(inst)
-					if pos then
-						local d = (pos - me).Magnitude
-						ind.DistanceLabel.Text = math.floor(d) .. " studs"
-						local k = math.clamp(1 - (d / DETECTION_RANGE), 0.3, 1)
-						ind.DistanceLabel.TextColor3 = Color3.fromRGB(255, 255 * (1 - k), 255 * (1 - k))
+local function tagShip(boat)
+	if not (groupsOK and boat) then return end
+	for _, d in ipairs(boat:GetDescendants()) do
+		if d:IsA("BasePart") and d.CanCollide and d.CollisionGroup ~= SHIP_GROUP then
+			shipOriginal[d] = d.CollisionGroup
+			mirrorRules(d.CollisionGroup)
+			pcall(function() d.CollisionGroup = SHIP_GROUP end)
+		end
+	end
+end
+
+local function untagShips()
+	for part, orig in pairs(shipOriginal) do
+		pcall(function() if part.Parent then part.CollisionGroup = orig end end)
+	end
+	shipOriginal = {}
+end
+
+-- ================= SHIP =================
+local function boatOwnedByMe(b)
+	for _, vn in ipairs({ "OwnerPlayer", "Owner" }) do
+		local v = b:FindFirstChild(vn)
+		if v and v:IsA("ObjectValue") and v.Value == LP then return true end
+	end
+	local bn = b:FindFirstChild("BoatName")
+	if bn and bn:IsA("StringValue") and bn.Value:sub(1, #LP.Name) == LP.Name then return true end
+	if b.Name == LP.Name .. "Boat" then return true end
+	return false
+end
+
+local function boatPivot(b)
+	local c = b.PrimaryPart or b:FindFirstChild("Center") or b:FindFirstChild("RootPart")
+	if c then return c.Position end
+	local ok, cf = pcall(function() return b:GetPivot() end)
+	return ok and cf.Position or nil
+end
+
+local function findShip()
+	local folder = Workspace:FindFirstChild(BOATS_FOLDER)
+	if not folder then return nil end
+	if SHIP_NAME_OVERRIDE ~= "" then
+		return folder:FindFirstChild(SHIP_NAME_OVERRIDE)
+	end
+	local boats = {}
+	for _, b in ipairs(folder:GetChildren()) do
+		if b:IsA("Model") and b:FindFirstChild(DECK_PART_NAME) then table.insert(boats, b) end
+	end
+	for _, b in ipairs(boats) do
+		if boatOwnedByMe(b) then return b end
+	end
+	-- fallback: nearest boat to me
+	local me = myPos()
+	local best, bd
+	for _, b in ipairs(boats) do
+		local p = boatPivot(b)
+		if p and me then
+			local d = (p - me).Magnitude
+			if not bd or d < bd then best, bd = b, d end
+		end
+	end
+	return best
+end
+
+-- the point on the ship the tunnel lands on: centre of the Deck part's top face
+local function shipDeckPoint(boat)
+	local deck = boat:FindFirstChild(DECK_PART_NAME)
+	if deck and deck:IsA("BasePart") then
+		return deck.Position + Vector3.new(0, deck.Size.Y * 0.5 + DECK_LIFT, 0), deck
+	end
+	local sp = boat:FindFirstChild("SpawnPoint")
+	if sp and sp:IsA("BasePart") then return sp.Position, sp end
+	local p = boatPivot(boat)
+	return p and (p + Vector3.new(0, 18, 0)) or nil, nil
+end
+
+-- ================= MEASURING THE ROCK =================
+local function rockCenter(rock)
+	local c = rock:FindFirstChild("Center")
+	if c and c:IsA("BasePart") then return c.Position end
+	local ok, cf = pcall(function() return rock:GetPivot() end)
+	return ok and cf.Position or nil
+end
+
+local function treasureBounds(rock)
+	local minx, maxx, minz, maxz, minb = math.huge, -math.huge, math.huge, -math.huge, math.huge
+	local n = 0
+	for _, p in ipairs(rock:GetChildren()) do
+		if p.Name == "Treasure" and p:IsA("BasePart") then
+			n = n + 1
+			minx = math.min(minx, p.Position.X - p.Size.X / 2); maxx = math.max(maxx, p.Position.X + p.Size.X / 2)
+			minz = math.min(minz, p.Position.Z - p.Size.Z / 2); maxz = math.max(maxz, p.Position.Z + p.Size.Z / 2)
+			minb = math.min(minb, p.Position.Y - p.Size.Y / 2)
+		end
+	end
+	if n == 0 then return nil end
+	return { minx = minx, maxx = maxx, minz = minz, maxz = maxz, bottom = minb }
+end
+
+local function groundLevel(rock)
+	local frag = rock:FindFirstChild("Fragmentable")
+	if not frag then return nil end
+	local hist = {}
+	for _, p in ipairs(frag:GetDescendants()) do
+		if p:IsA("BasePart") and p.Size.Y <= 1.5 and (p.Size.X * p.Size.Z) >= 300 then
+			local top = math.floor((p.Position.Y + p.Size.Y / 2) * 10 + 0.5) / 10
+			hist[top] = (hist[top] or 0) + 1
+		end
+	end
+	local keys = {}
+	for k in pairs(hist) do table.insert(keys, k) end
+	table.sort(keys)
+	for _, k in ipairs(keys) do if hist[k] >= 5 then return k end end
+	local best, bn
+	for _, k in ipairs(keys) do if not bn or hist[k] > bn then best, bn = k, hist[k] end end
+	return best
+end
+
+local function isSealedChest(inst)
+	return inst:IsA("BasePart") and inst:FindFirstChild("IsSealedChest") ~= nil
+end
+local function chestsOf(rock)
+	local out = {}
+	local folder = walk(Workspace, CHEST_FOLDER_PATH)
+	if not folder then return out end
+	for _, d in ipairs(folder:GetChildren()) do
+		if isSealedChest(d) then
+			local link = d:FindFirstChild("DSIsland")
+			if link and link.Value == rock then table.insert(out, d) end
+		end
+	end
+	return out
+end
+
+-- ================= PARTS =================
+local function mkPart(name, size, cf, color, parent, transp)
+	local p = Instance.new("Part")
+	p.Name = name; p.Size = size; p.CFrame = cf
+	p.Material = Enum.Material.Concrete
+	p.BrickColor = BrickColor.new(color)
+	p.Anchored = true; p.CanCollide = true; p.CanQuery = true; p.CanTouch = false
+	p.TopSurface = Enum.SurfaceType.Smooth; p.BottomSurface = Enum.SurfaceType.Smooth
+	p.Transparency = transp or 0
+	p.Parent = parent
+	return p
+end
+
+-- ================= TUNNEL =================
+-- One tunnel per rock: 4 anchored parts we re-CFrame every frame.
+local function makeTunnel(holder)
+	local t = {}
+	local z = CFrame.new(0, -1e6, 0)
+	t.floor = mkPart("TunnelFloor", Vector3.new(TUNNEL_WIDTH, TUNNEL_THICK, 1), z, "Medium stone grey", holder)
+	t.left  = mkPart("TunnelWallL", Vector3.new(TUNNEL_THICK, TUNNEL_HEIGHT, 1), z, "Dark stone grey", holder, TUNNEL_TRANSP)
+	t.right = mkPart("TunnelWallR", Vector3.new(TUNNEL_THICK, TUNNEL_HEIGHT, 1), z, "Dark stone grey", holder, TUNNEL_TRANSP)
+	t.roof  = mkPart("TunnelRoof",  Vector3.new(TUNNEL_WIDTH + TUNNEL_THICK * 2, TUNNEL_THICK, 1), z, "Dark stone grey", holder, TUNNEL_TRANSP)
+	for _, p in pairs(t) do
+		p.CanCollide = true
+		if groupsOK then pcall(function() p.CollisionGroup = TUNNEL_GROUP end) end
+	end
+	return t
+end
+
+-- aim the tunnel from A (floor-top point at the platform edge) to B (deck point)
+local function aimTunnel(t, A, B)
+	local d = B - A
+	local len = d.Magnitude
+	if len < 1 then return end
+	local dir = d / len
+	-- overlap the platform end; STOP SHORT of the deck point so the tunnel
+	-- never physically enters the ship (collision groups are the real guard,
+	-- this just keeps the geometry clean)
+	local A2 = A - dir * TUNNEL_OVERLAP
+	local B2 = B - dir * SHIP_END_GAP
+	local len2 = (B2 - A2).Magnitude
+	local mid = (A2 + B2) * 0.5
+	-- frame whose -Z (LookVector) runs along the tunnel; keep "up" world-ish
+	local frame = CFrame.lookAt(mid, mid + dir)
+	local up, right = frame.UpVector, frame.RightVector
+
+	t.floor.Size = Vector3.new(TUNNEL_WIDTH, TUNNEL_THICK, len2)
+	t.floor.CFrame = frame * CFrame.new(0, -TUNNEL_THICK * 0.5, 0)
+
+	t.left.Size  = Vector3.new(TUNNEL_THICK, TUNNEL_HEIGHT, len2)
+	t.left.CFrame  = frame * CFrame.new(-(TUNNEL_WIDTH * 0.5 + TUNNEL_THICK * 0.5), TUNNEL_HEIGHT * 0.5 - TUNNEL_THICK, 0)
+
+	t.right.Size = Vector3.new(TUNNEL_THICK, TUNNEL_HEIGHT, len2)
+	t.right.CFrame = frame * CFrame.new( (TUNNEL_WIDTH * 0.5 + TUNNEL_THICK * 0.5), TUNNEL_HEIGHT * 0.5 - TUNNEL_THICK, 0)
+
+	t.roof.Size  = Vector3.new(TUNNEL_WIDTH + TUNNEL_THICK * 2, TUNNEL_THICK, len2)
+	t.roof.CFrame  = frame * CFrame.new(0, TUNNEL_HEIGHT - TUNNEL_THICK * 1.5, 0)
+end
+
+-- point on the platform rectangle's edge, in the direction of the ship
+local function platformEdgeToward(rec, target)
+	local c = rec.floorCenter
+	local dx, dz = target.X - c.X, target.Z - c.Z
+	local horiz = math.sqrt(dx * dx + dz * dz)
+	if horiz < 1 then return Vector3.new(c.X, rec.floorTop, c.Z) end
+	local ux, uz = dx / horiz, dz / horiz
+	local tx = (ux ~= 0) and (rec.hx / math.abs(ux)) or math.huge
+	local tz = (uz ~= 0) and (rec.hz / math.abs(uz)) or math.huge
+	local tEdge = math.min(tx, tz)
+	return Vector3.new(c.X + ux * tEdge, rec.floorTop, c.Z + uz * tEdge)
+end
+
+-- ================= BUILD PER ROCK =================
+local function buildFor(rock)
+	local center = rockCenter(rock)
+	if not center then return nil end
+	local tb = treasureBounds(rock)
+	local ground = groundLevel(rock)
+
+	local chestBottom
+	for _, c in ipairs(chestsOf(rock)) do
+		local b = c.Position.Y - c.Size.Y / 2
+		chestBottom = chestBottom and math.min(chestBottom, b) or b
+	end
+	local floorTop = chestBottom and (chestBottom - FLOOR_DROP) or ground or (tb and tb.bottom + 0.9) or (center.Y + 42.8)
+
+	local cx, cz, sx, sz
+	if tb then
+		cx, cz = (tb.minx + tb.maxx) / 2, (tb.minz + tb.maxz) / 2
+		sx = math.max(FLOOR_MIN_SIZE, (tb.maxx - tb.minx) + FLOOR_MARGIN * 2)
+		sz = math.max(FLOOR_MIN_SIZE, (tb.maxz - tb.minz) + FLOOR_MARGIN * 2)
+	else
+		cx, cz, sx, sz = center.X, center.Z, FLOOR_MIN_SIZE, FLOOR_MIN_SIZE
+	end
+
+	local holder = Instance.new("Folder")
+	holder.Name = "SirenRockPlatform"
+	holder.Parent = Workspace
+
+	local rec = {
+		rock = rock, holder = holder,
+		floorTop = floorTop, floorCenter = Vector3.new(cx, floorTop, cz), hx = sx / 2, hz = sz / 2,
+		decks = {}, tunnel = nil, ship = nil, lastAim = 0,
+	}
+
+	mkPart("GroundFloor", Vector3.new(sx, FLOOR_THICK, sz), CFrame.new(cx, floorTop - FLOOR_THICK / 2, cz), "Medium stone grey", holder)
+	table.insert(rec.decks, { top = floorTop, cx = cx, cz = cz, hx = sx / 2, hz = sz / 2 })
+
+	if BUILD_ROOF then
+		mkPart("Roof", Vector3.new(sx + 60, 4, sz + 60), CFrame.new(cx, floorTop + ROOF_HEIGHT + 2, cz), "Dark stone grey", holder, 0.5)
+		if BUILD_PILLARS then
+			for _, d in ipairs({ {1,1}, {1,-1}, {-1,1}, {-1,-1} }) do
+				mkPart("Pillar", Vector3.new(4, ROOF_HEIGHT, 4),
+					CFrame.new(cx + (sx / 2 - 10) * d[1], floorTop + ROOF_HEIGHT / 2, cz + (sz / 2 - 10) * d[2]), "Dark stone grey", holder)
+			end
+		end
+	end
+
+	if BUILD_TUNNEL then rec.tunnel = makeTunnel(holder) end
+
+	table.insert(records, rec)
+	print(("[SirenRock] floor top %.2f, %dx%d at %.0f,%.0f"):format(floorTop, sx, sz, cx, cz))
+	return rec
+end
+
+-- per-frame: re-aim every tunnel at the ship
+local function updateTunnels(now)
+	local ship = findShip()
+	for _, rec in ipairs(records) do
+		if rec.tunnel and rec.holder.Parent then
+			if ship and ship.Parent then
+				if rec.ship ~= ship then tagShip(ship) end
+				if TUNNEL_UPDATE <= 0 or now - rec.lastAim >= TUNNEL_UPDATE then
+					rec.lastAim = now
+					local B = shipDeckPoint(ship)
+					if B then
+						local A = platformEdgeToward(rec, B)
+						aimTunnel(rec.tunnel, A, B)
+						rec.ship = ship
 					end
 				end
+			elseif rec.ship then
+				-- ship gone: park the tunnel out of the way
+				rec.ship = nil
+				for _, p in pairs(rec.tunnel) do p.CFrame = CFrame.new(0, -1e6, 0) end
 			end
 		end
-		task.wait(DISTANCE_UPDATE_RATE)
+	end
+end
+
+-- ================= CHEST CATCHER =================
+local function recordFor(chest)
+	local link = chest:FindFirstChild("DSIsland")
+	if link and link.Value and processed[link.Value] then return processed[link.Value] end
+	local best, bd
+	for _, rec in ipairs(records) do
+		local d = (Vector3.new(rec.floorCenter.X, 0, rec.floorCenter.Z) - Vector3.new(chest.Position.X, 0, chest.Position.Z)).Magnitude
+		if not bd or d < bd then best, bd = rec, d end
+	end
+	return best
+end
+local function considerChest(inst)
+	if not CATCH_CHESTS or not isSealedChest(inst) or chests[inst] then return end
+	local rec = recordFor(inst)
+	if not rec then return end
+	chests[inst] = rec
+	print("[SirenRock] tracking sealed chest:", inst.Name)
+end
+
+-- support the chest on: the platform floor, or the tunnel floor if it's inside the tunnel
+local function supportUnder(rec, chest)
+	local p = chest.Position
+	local bottom = p.Y - chest.Size.Y / 2
+	-- platform
+	for _, d in ipairs(rec.decks) do
+		if math.abs(p.X - d.cx) <= d.hx and math.abs(p.Z - d.cz) <= d.hz and d.top <= bottom + 1 then
+			return d.top, bottom
+		end
+	end
+	-- tunnel floor: project into the floor's local space
+	if rec.tunnel and rec.ship then
+		local f = rec.tunnel.floor
+		local lp = f.CFrame:PointToObjectSpace(p)
+		if math.abs(lp.X) <= f.Size.X / 2 and math.abs(lp.Z) <= f.Size.Z / 2 then
+			-- world Y of the floor top directly under the chest
+			local topLocal = Vector3.new(lp.X, f.Size.Y / 2, lp.Z)
+			local topWorld = f.CFrame:PointToWorldSpace(topLocal)
+			if topWorld.Y <= bottom + 1 then return topWorld.Y, bottom end
+		end
+	end
+	return nil, bottom
+end
+
+track(RunService.Heartbeat:Connect(function()
+	local now = tick()
+	updateTunnels(now)
+	if not CATCH_CHESTS then return end
+	claimSim()
+	for chest, rec in pairs(chests) do
+		if not chest.Parent or not rec.holder.Parent then
+			chests[chest] = nil
+		else
+			local top, bottom = supportUnder(rec, chest)
+			if top and bottom < top - SETTLE_MARGIN then
+				pcall(function()
+					local cf = chest.CFrame
+					chest.CFrame = CFrame.new(cf.X, top + chest.Size.Y / 2, cf.Z) * (cf - cf.Position)
+					chest.AssemblyLinearVelocity = Vector3.zero
+					chest.AssemblyAngularVelocity = Vector3.zero
+				end)
+			end
+		end
+	end
+end))
+
+track(Workspace.DescendantAdded:Connect(function(inst)
+	task.defer(function() if inst.Parent then considerChest(inst) end end)
+end))
+
+-- ================= ROCK PROCESSING =================
+local function processRock(rock)
+	if processed[rock] then return end
+	local rec = buildFor(rock)
+	if not rec then return end
+	processed[rock] = rec
+	if REMOVE_FRAGMENTABLE then
+		local frag = rock:FindFirstChild("Fragmentable")
+		if frag then pcall(function() frag:Destroy() end) end
+	end
+	for _, c in ipairs(chestsOf(rock)) do considerChest(c) end
+	notify("SirenRock", "Platform + tunnel built for " .. rock.Name, 3)
+	rock.AncestryChanged:Connect(function(_, parent)
+		if parent == nil and rec.holder then pcall(function() rec.holder:Destroy() end) end
+	end)
+end
+
+local function scan()
+	local me = myPos()
+	if not me then return end
+	local folder = walk(Workspace, ROCK_PATH)
+	if not folder then return end
+	for _, child in ipairs(folder:GetChildren()) do
+		if child.Name == ROCK_NAME then
+			local c = rockCenter(child)
+			if c and (c - me).Magnitude <= DETECTION_RANGE then processRock(child) end
+		end
+	end
+end
+
+setupGroups()
+
+local running = true
+task.spawn(function()
+	while running do
+		pcall(scan)
+		task.wait(SCAN_EVERY)
 	end
 end)
 
-getgenv().DarkSeaDetectorStop = function()
+-- a boat that spawns later (respawn / new ship) gets tagged too
+local boatsFolder = Workspace:FindFirstChild(BOATS_FOLDER)
+if boatsFolder then
+	track(boatsFolder.ChildAdded:Connect(function(b)
+		task.delay(1, function() if b.Parent and b:FindFirstChild(DECK_PART_NAME) then tagShip(b) end end)
+	end))
+	track(boatsFolder.DescendantAdded:Connect(function(d)
+		-- parts added to an already-tagged boat
+		if d:IsA("BasePart") and d.CanCollide then
+			local boat = d:FindFirstAncestorWhichIsA("Model")
+			if boat and boat.Parent == boatsFolder and next(shipOriginal) then task.defer(tagShip, boat) end
+		end
+	end))
+end
+
+getgenv().SirenRockStop = function()
 	running = false
 	for _, c in ipairs(conns) do pcall(function() c:Disconnect() end) end
 	conns = {}
-	for _, ind in pairs(tracked) do pcall(function() ind.Gui:Destroy() end) end
-	tracked = {}
-	getgenv().DarkSeaDetectorRunning = false
+	untagShips()
+	for _, rec in ipairs(records) do pcall(function() rec.holder:Destroy() end) end
+	records, chests, processed = {}, {}, {}
+	getgenv().SirenRockRunning = false
 end
 
-pcall(sweep)
-notify("Dark Sea Detection Active", "SirenRocks · Hecate's Essence · Prometheus's Acrimony", 3)
-print("[DarkSea] detector started - range " .. DETECTION_RANGE .. " studs")
+notify("Auto Platform Builder", "Scanning for SirenRocks within " .. DETECTION_RANGE .. " studs", 4)
+print("[SirenRock] started - range", DETECTION_RANGE)
