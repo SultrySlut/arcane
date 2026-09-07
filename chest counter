@@ -1,0 +1,191 @@
+--[[
+	SHIP CHEST COUNTER
+	------------------------------------------------------------------
+	Counts the sealed chests physically placed on YOUR ship.
+
+	How the game marks "on a boat": when you place cargo on a ship the server
+	adds a WeldConstraint named "BoatWeld" to the chest with
+	    BoatWeld.Part1 == thatBoat.Center
+	Your boat is  workspace.Boats[YourName .. "Boat"].
+	So: sealed chest + BoatWeld.Part1 == myBoat.Center  ->  it's on your ship.
+
+	Shows a small HUD (detector style) with Dark / Bronze / Nimbus / total,
+	and a notification whenever the count changes.
+	Unload: getgenv().ShipChestsStop()
+--]]
+
+local Players    = game:GetService("Players")
+local Workspace  = game:GetService("Workspace")
+local StarterGui = game:GetService("StarterGui")
+local LP         = Players.LocalPlayer
+
+-- ================= CONFIG =================
+local UPDATE_RATE     = 0.5
+local BOAT_NAME       = ""          -- "" = auto (YourName.."Boat"); set to force e.g. "C2Z6H3Boat"
+local COUNT_CARRIED   = true        -- also show a chest you're currently carrying as "in hand"
+local NOTIFY_CHANGES  = true
+local CHEST_FOLDER    = { "Map", "Temporary" }
+-- ==========================================
+
+if getgenv().ShipChestsRunning then
+	if getgenv().ShipChestsStop then getgenv().ShipChestsStop() end
+end
+getgenv().ShipChestsRunning = true
+
+local function walk(root, path)
+	local n = root
+	for _, k in ipairs(path) do n = n and n:FindFirstChild(k) end
+	return n
+end
+
+local function myBoat()
+	local boats = Workspace:FindFirstChild("Boats")
+	if not boats then return nil end
+	if BOAT_NAME ~= "" then return boats:FindFirstChild(BOAT_NAME) end
+	local b = boats:FindFirstChild(LP.Name .. "Boat")
+	if b then return b end
+	-- fallback: owner values
+	for _, m in ipairs(boats:GetChildren()) do
+		for _, vn in ipairs({ "OwnerPlayer", "Owner" }) do
+			local v = m:FindFirstChild(vn)
+			if v and v:IsA("ObjectValue") and v.Value == LP then return m end
+		end
+	end
+	return nil
+end
+
+local function isSealedChest(inst)
+	return inst:IsA("BasePart") and inst:FindFirstChild("IsSealedChest") ~= nil
+end
+
+-- kind of chest from its name: "Dark", "Bronze", "Nimbus", or first word
+local function chestKind(name)
+	local k = name:match("^(%S+)%s+Sealed") or name:match("^(%S+)")
+	return k or name
+end
+
+-- count chests welded to the boat (+ optionally the one in your hands)
+local function countChests()
+	local boat = myBoat()
+	local center = boat and (boat:FindFirstChild("Center") or boat.PrimaryPart)
+	local counts, total, carried = {}, 0, nil
+
+	local function consider(c)
+		if not isSealedChest(c) then return end
+		local weld = c:FindFirstChild("BoatWeld")
+		if center and weld and weld:IsA("WeldConstraint") and weld.Part1 == center then
+			local k = chestKind(c.Name)
+			counts[k] = (counts[k] or 0) + 1
+			total = total + 1
+		elseif COUNT_CARRIED then
+			local carrier = c:FindFirstChild("Carrier")
+			if carrier and carrier.Value == LP.Name then carried = c.Name end
+		end
+	end
+
+	local folder = walk(Workspace, CHEST_FOLDER)
+	if folder then
+		for _, c in ipairs(folder:GetChildren()) do consider(c) end
+	end
+	-- chests can also end up parented under the boat itself; check there too
+	if boat then
+		for _, c in ipairs(boat:GetDescendants()) do
+			if isSealedChest(c) and not (folder and c.Parent == folder) then consider(c) end
+		end
+	end
+	return boat, counts, total, carried
+end
+
+-- ================= HUD (detector style) =================
+local hud
+do
+	local parent = game:GetService("CoreGui")
+	pcall(function() if typeof(gethui) == "function" then parent = gethui() end end)
+	local old = parent:FindFirstChild("ShipChestsHUD")
+	if old then old:Destroy() end
+	local sg = Instance.new("ScreenGui")
+	sg.Name = "ShipChestsHUD"; sg.ResetOnSpawn = false; sg.Parent = parent
+
+	local f = Instance.new("Frame")
+	f.Size = UDim2.new(0, 220, 0, 96)
+	f.Position = UDim2.new(0, 12, 0, 204)
+	f.BackgroundTransparency = 0.3
+	f.BackgroundColor3 = Color3.fromRGB(20, 20, 20)
+	f.BorderSizePixel = 0
+	f.Parent = sg
+	Instance.new("UICorner", f).CornerRadius = UDim.new(0, 8)
+
+	local title = Instance.new("TextLabel")
+	title.Size = UDim2.new(1, -12, 0, 26); title.Position = UDim2.new(0, 6, 0, 4)
+	title.BackgroundTransparency = 1; title.Font = Enum.Font.SourceSansBold; title.TextScaled = true
+	title.TextXAlignment = Enum.TextXAlignment.Left
+	title.TextColor3 = Color3.fromRGB(255, 200, 100)
+	title.Text = "📦 SHIP CHESTS: 0"; title.Parent = f
+
+	local body = Instance.new("TextLabel")
+	body.Size = UDim2.new(1, -12, 0, 62); body.Position = UDim2.new(0, 6, 0, 30)
+	body.BackgroundTransparency = 1; body.Font = Enum.Font.SourceSans; body.TextSize = 15
+	body.TextXAlignment = Enum.TextXAlignment.Left; body.TextYAlignment = Enum.TextYAlignment.Top
+	body.TextColor3 = Color3.fromRGB(230, 230, 230); body.TextWrapped = true
+	body.Text = "looking for your boat..."; body.Parent = f
+
+	hud = { gui = sg, title = title, body = body }
+end
+
+local lastTotal, lastKey = -1, ""
+local running = true
+
+local function refresh()
+	local boat, counts, total, carried = countChests()
+	if not boat then
+		hud.title.Text = "📦 SHIP CHESTS: -"
+		hud.title.TextColor3 = Color3.fromRGB(200, 200, 200)
+		hud.body.Text = "no boat found (workspace.Boats." .. LP.Name .. "Boat)"
+		return
+	end
+
+	local dark = counts.Dark or 0
+	hud.title.Text = ("📦 SHIP CHESTS: %d"):format(total)
+	hud.title.TextColor3 = dark > 0 and Color3.fromRGB(180, 120, 255) or Color3.fromRGB(255, 200, 100)
+
+	local lines = { ("Dark: %d"):format(dark) }
+	local order = {}
+	for k in pairs(counts) do if k ~= "Dark" then table.insert(order, k) end end
+	table.sort(order)
+	for _, k in ipairs(order) do table.insert(lines, ("%s: %d"):format(k, counts[k])) end
+	if carried then table.insert(lines, "in hand: " .. carried) end
+	local bn = boat:FindFirstChild("BoatName")
+	table.insert(lines, (bn and bn:IsA("StringValue") and bn.Value ~= "") and bn.Value or boat.Name)
+	hud.body.Text = table.concat(lines, "\n")
+
+	-- notify on change
+	local key = tostring(total) .. "|" .. tostring(dark)
+	if NOTIFY_CHANGES and lastTotal >= 0 and key ~= lastKey then
+		pcall(function()
+			StarterGui:SetCore("SendNotification", {
+				Title = "Ship Chests",
+				Text = ("%d on board (%d Dark)"):format(total, dark),
+				Duration = 3,
+			})
+		end)
+	end
+	lastTotal, lastKey = total, key
+end
+
+task.spawn(function()
+	while running do pcall(refresh); task.wait(UPDATE_RATE) end
+end)
+
+getgenv().ShipChestsStop = function()
+	running = false
+	if hud then pcall(function() hud.gui:Destroy() end) end
+	getgenv().ShipChestsRunning = false
+end
+
+-- console helper: getgenv().ShipChests() returns boat, countsTable, total
+getgenv().ShipChests = function()
+	local boat, counts, total = countChests()
+	return boat, counts, total
+end
+
+print("[ShipChests] started")
