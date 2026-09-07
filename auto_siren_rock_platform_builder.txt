@@ -22,6 +22,7 @@ local Players   = game:GetService("Players")
 local Workspace = game:GetService("Workspace")
 local RunService= game:GetService("RunService")
 local StarterGui= game:GetService("StarterGui")
+local PhysicsService = game:GetService("PhysicsService")
 local LP        = Players.LocalPlayer
 
 -- ================= CONFIG =================
@@ -56,6 +57,12 @@ local DECK_PART_NAME    = "Deck"   -- boat part whose top is the walkable deck
 local DECK_LIFT         = 0.3      -- tunnel floor top above the deck top at the ship end
 local TUNNEL_UPDATE     = 0        -- seconds between re-aims (0 = every frame)
 local TUNNEL_TRANSP     = 0.35     -- walls/ceiling transparency so you can see out
+-- The tunnel must never physically touch the ship (it's anchored; overlapping
+-- the hull shoves the boat into the sea). Tunnel parts go in their own
+-- collision group that collides with players but NOT with the ship.
+local TUNNEL_GROUP      = "ArcTunnel"
+local SHIP_GROUP        = "ArcShip"
+local SHIP_END_GAP      = 2        -- studs the tunnel stops short of the deck point
 
 -- chest catcher
 local CATCH_CHESTS      = true
@@ -95,6 +102,63 @@ local function claimSim()
 			sethiddenproperty(LP, "SimulationRadius", math.huge)
 		end
 	end)
+end
+
+-- ================= COLLISION GROUPS =================
+-- Tunnel <-> Ship = no collision. The ship's collidable parts are moved into
+-- SHIP_GROUP locally, mirroring whatever rules their original group had so
+-- nothing else about the boat's physics changes. Restored on unload.
+local groupsOK = false
+local shipOriginal = {}     -- part -> original CollisionGroup
+local mirrored = {}         -- originalGroup -> true (rules already copied)
+
+local function setupGroups()
+	local ok = pcall(function()
+		local reg = {}
+		for _, g in ipairs(PhysicsService:GetRegisteredCollisionGroups()) do reg[g.name] = true end
+		if not reg[TUNNEL_GROUP] then PhysicsService:RegisterCollisionGroup(TUNNEL_GROUP) end
+		if not reg[SHIP_GROUP] then PhysicsService:RegisterCollisionGroup(SHIP_GROUP) end
+		PhysicsService:CollisionGroupSetCollidable(TUNNEL_GROUP, SHIP_GROUP, false)
+	end)
+	groupsOK = ok
+	if not ok then warn("[SirenRock] collision groups unavailable - tunnel will be non-solid near the ship") end
+	return ok
+end
+
+local function mirrorRules(orig)
+	if mirrored[orig] then return end
+	mirrored[orig] = true
+	pcall(function()
+		for _, g in ipairs(PhysicsService:GetRegisteredCollisionGroups()) do
+			local name = g.name
+			if name == TUNNEL_GROUP then
+				PhysicsService:CollisionGroupSetCollidable(SHIP_GROUP, TUNNEL_GROUP, false)
+			elseif name ~= SHIP_GROUP then
+				PhysicsService:CollisionGroupSetCollidable(SHIP_GROUP, name,
+					PhysicsService:CollisionGroupsAreCollidable(orig, name))
+			end
+		end
+		PhysicsService:CollisionGroupSetCollidable(SHIP_GROUP, SHIP_GROUP,
+			PhysicsService:CollisionGroupsAreCollidable(orig, orig))
+	end)
+end
+
+local function tagShip(boat)
+	if not (groupsOK and boat) then return end
+	for _, d in ipairs(boat:GetDescendants()) do
+		if d:IsA("BasePart") and d.CanCollide and d.CollisionGroup ~= SHIP_GROUP then
+			shipOriginal[d] = d.CollisionGroup
+			mirrorRules(d.CollisionGroup)
+			pcall(function() d.CollisionGroup = SHIP_GROUP end)
+		end
+	end
+end
+
+local function untagShips()
+	for part, orig in pairs(shipOriginal) do
+		pcall(function() if part.Parent then part.CollisionGroup = orig end end)
+	end
+	shipOriginal = {}
 end
 
 -- ================= SHIP =================
@@ -234,7 +298,10 @@ local function makeTunnel(holder)
 	t.left  = mkPart("TunnelWallL", Vector3.new(TUNNEL_THICK, TUNNEL_HEIGHT, 1), z, "Dark stone grey", holder, TUNNEL_TRANSP)
 	t.right = mkPart("TunnelWallR", Vector3.new(TUNNEL_THICK, TUNNEL_HEIGHT, 1), z, "Dark stone grey", holder, TUNNEL_TRANSP)
 	t.roof  = mkPart("TunnelRoof",  Vector3.new(TUNNEL_WIDTH + TUNNEL_THICK * 2, TUNNEL_THICK, 1), z, "Dark stone grey", holder, TUNNEL_TRANSP)
-	for _, p in pairs(t) do p.CanCollide = true end
+	for _, p in pairs(t) do
+		p.CanCollide = true
+		if groupsOK then pcall(function() p.CollisionGroup = TUNNEL_GROUP end) end
+	end
 	return t
 end
 
@@ -244,9 +311,11 @@ local function aimTunnel(t, A, B)
 	local len = d.Magnitude
 	if len < 1 then return end
 	local dir = d / len
-	-- extend both ends a little so it overlaps the platform and the deck
+	-- overlap the platform end; STOP SHORT of the deck point so the tunnel
+	-- never physically enters the ship (collision groups are the real guard,
+	-- this just keeps the geometry clean)
 	local A2 = A - dir * TUNNEL_OVERLAP
-	local B2 = B + dir * TUNNEL_OVERLAP
+	local B2 = B - dir * SHIP_END_GAP
 	local len2 = (B2 - A2).Magnitude
 	local mid = (A2 + B2) * 0.5
 	-- frame whose -Z (LookVector) runs along the tunnel; keep "up" world-ish
@@ -338,6 +407,7 @@ local function updateTunnels(now)
 	for _, rec in ipairs(records) do
 		if rec.tunnel and rec.holder.Parent then
 			if ship and ship.Parent then
+				if rec.ship ~= ship then tagShip(ship) end
 				if TUNNEL_UPDATE <= 0 or now - rec.lastAim >= TUNNEL_UPDATE then
 					rec.lastAim = now
 					local B = shipDeckPoint(ship)
@@ -455,6 +525,8 @@ local function scan()
 	end
 end
 
+setupGroups()
+
 local running = true
 task.spawn(function()
 	while running do
@@ -463,10 +535,26 @@ task.spawn(function()
 	end
 end)
 
+-- a boat that spawns later (respawn / new ship) gets tagged too
+local boatsFolder = Workspace:FindFirstChild(BOATS_FOLDER)
+if boatsFolder then
+	track(boatsFolder.ChildAdded:Connect(function(b)
+		task.delay(1, function() if b.Parent and b:FindFirstChild(DECK_PART_NAME) then tagShip(b) end end)
+	end))
+	track(boatsFolder.DescendantAdded:Connect(function(d)
+		-- parts added to an already-tagged boat
+		if d:IsA("BasePart") and d.CanCollide then
+			local boat = d:FindFirstAncestorWhichIsA("Model")
+			if boat and boat.Parent == boatsFolder and next(shipOriginal) then task.defer(tagShip, boat) end
+		end
+	end))
+end
+
 getgenv().SirenRockStop = function()
 	running = false
 	for _, c in ipairs(conns) do pcall(function() c:Disconnect() end) end
 	conns = {}
+	untagShips()
 	for _, rec in ipairs(records) do pcall(function() rec.holder:Destroy() end) end
 	records, chests, processed = {}, {}, {}
 	getgenv().SirenRockRunning = false
