@@ -33,11 +33,20 @@ local UPDATE_RATE      = 0.5     -- rescan for chests
 local TEXT_RATE        = 0.1     -- refresh the numbers
 local PICKUP_RANGE     = 30      -- server: must be within 30 studs of the chest to pick it up
 
--- The threshold the server uses lives in a server-only module, so this is a
--- guess. It is the fastest you can legitimately move between cargo actions,
--- in studs per second. Ships are the fastest legit way to travel, so this is
--- set a bit above a fast ship. Lower it to be safer.
-local MAX_SAFE_SPEED   = 100
+-- The server's real threshold lives in a server-only module (ExploitLogs, a
+-- Discord webhook logger) so it can't be read. What CAN be read is the
+-- fastest LEGIT travel, which the threshold must sit above:
+--   ship base speeds  30 / 50 / 60 / 70 (Brig) / 75 (The Omen)
+--   + sail material    up to ~+25 (tester cloth is +35)
+--   + sail enchant     Swift +10, Brisk +15, Warship +25
+--   => a maxed player ship is ~120 studs/s
+-- Community data puts a fully kitted ship (deckhands + hull + ram + sail)
+-- at ~150. Observed routine (vfly to ring 3 + 5 min wait, then grabbing
+-- clean) works out to ~170 seen by the server. 165 sits just under that.
+local MAX_SAFE_SPEED   = 165     -- starting value; the HUD +/- buttons change it live and it's saved
+local LIMIT_STEP       = 10      -- +/- step
+local LOG_FILE         = "CargoCheck/grabs.json"   -- every grab: distance, elapsed, implied speed
+local SETTINGS_FILE    = "CargoCheck/settings.json"
 local MIN_GAP          = 1.5     -- seconds: hard floor between cargo actions (server uses 1s on sells)
 local PING_ALLOWANCE   = 0.5     -- seconds of slack for ping / server tick
 
@@ -84,9 +93,59 @@ local function binValues()
 	return nil
 end
 
+-- ================= PERSISTENCE (limit + grab log) =================
+local HttpService = game:GetService("HttpService")
+local hasFS = typeof(isfile) == "function" and typeof(writefile) == "function" and typeof(readfile) == "function"
+local function readJSON(path)
+	if not hasFS or not isfile(path) then return nil end
+	local ok, d = pcall(function() return HttpService:JSONDecode(readfile(path)) end)
+	return ok and d or nil
+end
+local function writeJSON(path, data)
+	if not hasFS then return end
+	pcall(function()
+		if typeof(makefolder) == "function" and typeof(isfolder) == "function" and not isfolder("CargoCheck") then makefolder("CargoCheck") end
+		writefile(path, HttpService:JSONEncode(data))
+	end)
+end
+do
+	local st = readJSON(SETTINGS_FILE)
+	if st and tonumber(st.limit) then MAX_SAFE_SPEED = tonumber(st.limit) end
+end
+local function saveSettings() writeJSON(SETTINGS_FILE, { limit = MAX_SAFE_SPEED }) end
+
+-- grab log: one entry per pickup with the numbers the server sees
+local grabLog = readJSON(LOG_FILE) or {}
+local stats = { grabs = 0, maxSpeed = 0 }     -- this session
+for _, g in ipairs(grabLog) do
+	if type(g.speed) == "number" and g.speed > stats.maxSpeed and g.speed < 1e6 then stats.maxSpeed = g.speed end
+end
+local function logGrab(dist, elapsed, speed)
+	stats.grabs = stats.grabs + 1
+	if speed < 1e6 and speed > stats.maxSpeed then stats.maxSpeed = speed end
+	table.insert(grabLog, { t = os.time(), dist = math.floor(dist), elapsed = math.floor(elapsed * 10) / 10,
+		speed = math.floor(speed * 10) / 10, limit = MAX_SAFE_SPEED })
+	if #grabLog > 500 then table.remove(grabLog, 1) end
+	writeJSON(LOG_FILE, grabLog)
+	print(("[CargoCheck] GRAB  dist %.0f  elapsed %.1fs  implied %.0f st/s  (limit %d)"):format(dist, elapsed, speed, MAX_SAFE_SPEED))
+end
+
+local lastPickupAt = 0
 local function markAction(reason)
 	local hrp = myHRP()
 	if not hrp then return end
+	-- the same pickup is seen twice (Carrying value + Carry remote): count it once
+	if reason == "pickup" then
+		if serverNow() - lastPickupAt < 1 then return end
+		lastPickupAt = serverNow()
+	end
+	-- a pickup is the moment the server runs its check: record what it saw
+	if reason == "pickup" and last.pos then
+		local elapsed = math.max(0, serverNow() - last.time)
+		local dist = (hrp.Position - last.pos).Magnitude
+		local speed = elapsed > 0 and dist / elapsed or math.huge
+		logGrab(dist, elapsed, speed)
+	end
 	last.pos, last.time, last.source = hrp.Position, serverNow(), reason
 	print(("[CargoCheck] cargo action: %s at %.0f,%.0f,%.0f"):format(reason, hrp.Position.X, hrp.Position.Y, hrp.Position.Z))
 end
@@ -224,7 +283,7 @@ do
 	sg.ResetOnSpawn = false
 	sg.Parent = parent
 	local f = Instance.new("Frame")
-	f.Size = UDim2.new(0, 260, 0, 74)
+	f.Size = UDim2.new(0, 280, 0, 118)
 	f.Position = UDim2.new(0, 12, 0, 120)
 	f.BackgroundTransparency = 0.3
 	f.BackgroundColor3 = Color3.fromRGB(20, 20, 20)
@@ -242,7 +301,25 @@ do
 	t2.TextXAlignment = Enum.TextXAlignment.Left; t2.TextYAlignment = Enum.TextYAlignment.Top
 	t2.TextColor3 = Color3.fromRGB(230, 230, 230); t2.TextWrapped = true
 	t2.Text = "no cargo action yet"; t2.Parent = f
-	hud = { gui = sg, title = t1, body = t2 }
+	-- limit row: [-] limit [+]
+	local function small(txt, x)
+		local b = Instance.new("TextButton")
+		b.Size = UDim2.new(0, 28, 0, 22); b.Position = UDim2.new(0, x, 0, 90)
+		b.BackgroundColor3 = Color3.fromRGB(60, 60, 68); b.BorderSizePixel = 0
+		b.Text = txt; b.TextColor3 = Color3.fromRGB(235, 235, 240); b.TextSize = 16; b.Font = Enum.Font.SourceSansBold
+		b.Parent = f; Instance.new("UICorner", b).CornerRadius = UDim.new(0, 6)
+		return b
+	end
+	local minus = small("-", 6)
+	local plus  = small("+", 40)
+	local lim = Instance.new("TextLabel")
+	lim.Size = UDim2.new(1, -80, 0, 22); lim.Position = UDim2.new(0, 74, 0, 90)
+	lim.BackgroundTransparency = 1; lim.Font = Enum.Font.SourceSans; lim.TextSize = 14
+	lim.TextXAlignment = Enum.TextXAlignment.Left; lim.TextColor3 = Color3.fromRGB(230, 230, 230)
+	lim.Text = ""; lim.Parent = f
+	minus.MouseButton1Click:Connect(function() MAX_SAFE_SPEED = math.max(10, MAX_SAFE_SPEED - LIMIT_STEP); saveSettings() end)
+	plus.MouseButton1Click:Connect(function() MAX_SAFE_SPEED = MAX_SAFE_SPEED + LIMIT_STEP; saveSettings() end)
+	hud = { gui = sg, title = t1, body = t2, limit = lim }
 end
 
 -- ================= LOOPS =================
@@ -287,10 +364,20 @@ local function updateText()
 		else
 			hud.title.TextColor3 = ok and Color3.fromRGB(100, 255, 100) or Color3.fromRGB(255, 100, 100)
 			hud.body.Text = string.format(
-				"last action: %s, %s ago, %.0f studs away\nimplied speed %.0f st/s (limit %d)  %s",
-				last.source, fmtWait(elapsed), dist, speed == math.huge and 0 or speed, MAX_SAFE_SPEED,
+				"last action: %s, %s ago, %.0f studs away\nimplied here %.0f st/s  %s",
+				last.source, fmtWait(elapsed), dist, speed == math.huge and 0 or speed,
 				ok and "OK HERE" or ("WAIT " .. fmtWait(wait)))
 		end
+	end
+
+	if hud.limit then
+		hud.limit.Text = string.format("limit %d st/s   grabs %d   fastest ok %.0f",
+			MAX_SAFE_SPEED, #grabLog, stats.maxSpeed)
+	end
+	-- share the verdict-at-my-position with other scripts (vfly panel shows it)
+	do
+		local ok, wait = verdictAt(me)
+		getgenv().CargoCheckState = { ok = ok, wait = wait, limit = MAX_SAFE_SPEED, t = tick() }
 	end
 
 	-- per-chest indicators
