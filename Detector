@@ -1,0 +1,286 @@
+--[[
+	DARK SEA DETECTOR  -  SirenRocks, Hecate's Essence, Prometheus's Acrimony
+	------------------------------------------------------------------
+	Same indicator style as the SirenRock detector, extended to three targets.
+	Each target type has its own label/colour and its own match rule, so you
+	can add more in TARGETS below.
+
+	Matching:
+	  SIREN ROCK   name == "SirenRock"
+	  HECATE       name contains "hecate" (HecateEssence / Hecate's Essence ...),
+	               or a part with a child named "Light" inside the Dark Sea
+	               folder (the server hands exactly such an object to the
+	               HecateEssence remote)
+	  ACRIMONY     name contains "acrimony", or "prometheus" (but not the
+	               MB_Prometheus memory-board note)
+
+	Scanning uses Workspace.DescendantAdded plus one initial sweep, instead of
+	walking the whole workspace twice a second.
+	Unload: getgenv().DarkSeaDetectorStop()
+--]]
+
+local Players    = game:GetService("Players")
+local Workspace  = game:GetService("Workspace")
+local StarterGui = game:GetService("StarterGui")
+local LP         = Players.LocalPlayer
+
+-- ================= CONFIG =================
+local DETECTION_RANGE      = 20000
+local VERIFY_RATE          = 1.0    -- re-check tracked objects / range this often
+local DISTANCE_UPDATE_RATE = 0.1    -- distance text refresh
+local RESWEEP_EVERY        = 30     -- full workspace sweep this often (safety net), 0 = never
+
+local function nameHas(inst, s) return inst.Name:lower():find(s, 1, true) ~= nil end
+local function underDarkSea(inst)
+	local ds = Workspace:FindFirstChild("Map")
+	ds = ds and ds:FindFirstChild("SeaContent")
+	ds = ds and ds:FindFirstChild("DarkSea")
+	return ds ~= nil and inst:IsDescendantOf(ds)
+end
+-- items spawn as a Model, a BasePart, or (like the RS.Items templates) a
+-- Folder named after the item holding Part0/Part1...
+local function isWorldObject(inst)
+	return inst:IsA("Model") or inst:IsA("BasePart") or inst:IsA("Folder")
+end
+
+local TARGETS = {
+	{
+		key   = "siren",
+		label = "⚠️ SIREN ROCK",
+		color = Color3.fromRGB(255, 100, 100),
+		match = function(inst) return inst.Name == "SirenRock" end,
+	},
+	{
+		key   = "hecate",
+		label = "✨ HECATE'S ESSENCE",
+		color = Color3.fromRGB(190, 120, 255),
+		match = function(inst)
+			if not isWorldObject(inst) then return false end
+			if nameHas(inst, "hecate") then return true end
+			-- structural fallback: a lit pickup in the Dark Sea
+			if inst:IsA("BasePart") and underDarkSea(inst) and inst:FindFirstChild("Light") then
+				return true
+			end
+			return false
+		end,
+	},
+	{
+		key   = "acrimony",
+		label = "🔥 PROMETHEUS'S ACRIMONY",
+		color = Color3.fromRGB(255, 150, 60),
+		match = function(inst)
+			if not isWorldObject(inst) then return false end
+			if nameHas(inst, "acrimony") then return true end
+			if nameHas(inst, "prometheus") and not inst.Name:find("^MB_") then return true end
+			return false
+		end,
+	},
+}
+-- ==========================================
+
+if getgenv().DarkSeaDetectorRunning then
+	if getgenv().DarkSeaDetectorStop then getgenv().DarkSeaDetectorStop() end
+end
+getgenv().DarkSeaDetectorRunning = true
+
+local tracked = {}     -- inst -> {Gui, DistanceLabel, Target, GuiParent}
+local conns = {}
+local function track(c) table.insert(conns, c); return c end
+
+-- ---------- helpers (same as the original detector) ----------
+local function getPosition(inst)
+	if inst:IsA("BasePart") then return inst.Position end
+	if inst:IsA("Model") then
+		if inst.PrimaryPart then return inst.PrimaryPart.Position end
+		local ok, cf = pcall(function() return inst:GetPivot() end)
+		if ok then return cf.Position end
+	end
+	local part = inst:FindFirstChildWhichIsA("BasePart", true)
+	return part and part.Position
+end
+
+local function getGuiParent(inst)
+	if inst:IsA("BasePart") then return inst end
+	if inst:IsA("Model") and inst.PrimaryPart then return inst.PrimaryPart end
+	return inst:FindFirstChildWhichIsA("BasePart", true)
+end
+
+local function whichTarget(inst)
+	for _, t in ipairs(TARGETS) do
+		local ok, hit = pcall(t.match, inst)
+		if ok and hit then
+			-- a container must actually contain geometry to be a world item
+			if inst:IsA("Folder") and not inst:FindFirstChildWhichIsA("BasePart", true) then return nil end
+			return t
+		end
+	end
+	return nil
+end
+
+-- skip things that are inside a boat / a character / our own indicators
+local function excluded(inst)
+	if inst:IsA("BillboardGui") or inst:IsA("GuiObject") then return true end
+	local boats = Workspace:FindFirstChild("Boats")
+	if boats and inst:IsDescendantOf(boats) then return true end
+	for _, p in ipairs(Players:GetPlayers()) do
+		if p.Character and inst:IsDescendantOf(p.Character) then return true end
+	end
+	return false
+end
+
+-- ---------- indicator (original UI style) ----------
+local function createIndicator(inst, target)
+	local guiParent = getGuiParent(inst)
+	if not guiParent then return nil end
+	local existing = guiParent:FindFirstChild("DarkSeaIndicator")
+	if existing then existing:Destroy() end
+
+	local gui = Instance.new("BillboardGui")
+	gui.Name = "DarkSeaIndicator"
+	gui.Size = UDim2.new(0, 200, 0, 100)
+	gui.StudsOffset = Vector3.new(0, 10, 0)
+	gui.AlwaysOnTop = true
+	gui.Parent = guiParent
+
+	local frame = Instance.new("Frame")
+	frame.Name = "Frame"
+	frame.Size = UDim2.new(1, 0, 1, 0)
+	frame.BackgroundTransparency = 0.3
+	frame.BackgroundColor3 = Color3.fromRGB(20, 20, 20)
+	frame.BorderSizePixel = 0
+	frame.Parent = gui
+	local corner = Instance.new("UICorner")
+	corner.CornerRadius = UDim.new(0, 8)
+	corner.Parent = frame
+
+	local icon = Instance.new("TextLabel")
+	icon.Name = "IconText"
+	icon.Size = UDim2.new(1, 0, 0.4, 0)
+	icon.Position = UDim2.new(0, 0, 0, 5)
+	icon.BackgroundTransparency = 1
+	icon.Text = target.label
+	icon.TextColor3 = target.color
+	icon.TextScaled = true
+	icon.Font = Enum.Font.SourceSansBold
+	icon.Parent = frame
+
+	local dist = Instance.new("TextLabel")
+	dist.Name = "DistanceText"
+	dist.Size = UDim2.new(1, 0, 0.5, 0)
+	dist.Position = UDim2.new(0, 0, 0.4, 0)
+	dist.BackgroundTransparency = 1
+	dist.Text = "0 studs"
+	dist.TextColor3 = Color3.fromRGB(255, 255, 255)
+	dist.TextScaled = true
+	dist.Font = Enum.Font.SourceSans
+	dist.Parent = frame
+
+	return { Gui = gui, DistanceLabel = dist, Target = target, GuiParent = guiParent }
+end
+
+local function notify(title, text, dur)
+	pcall(function() StarterGui:SetCore("SendNotification", { Title = title, Text = text, Duration = dur or 3 }) end)
+end
+
+local function myPos()
+	local ch = LP.Character
+	local hrp = ch and ch:FindFirstChild("HumanoidRootPart")
+	return hrp and hrp.Position
+end
+
+-- ---------- tracking ----------
+local function consider(inst)
+	if tracked[inst] or excluded(inst) then return end
+	local target = whichTarget(inst)
+	if not target then return end
+	-- don't tag a child of something we already tag (e.g. parts inside a SirenRock)
+	for other in pairs(tracked) do
+		if inst:IsDescendantOf(other) then return end
+	end
+	local me = myPos()
+	local pos = getPosition(inst)
+	if not (me and pos) then return end
+	local d = (pos - me).Magnitude
+	if d > DETECTION_RANGE then return end
+	local ind = createIndicator(inst, target)
+	if ind then
+		tracked[inst] = ind
+		print(("[DarkSea] %s detected at %d studs"):format(target.label, math.floor(d)))
+		if target.key ~= "siren" then
+			notify(target.label, math.floor(d) .. " studs away", 5)
+		end
+	end
+end
+
+local function sweep()
+	for _, d in ipairs(Workspace:GetDescendants()) do consider(d) end
+end
+
+-- new things appearing (essence/acrimony spawn mid-session)
+track(Workspace.DescendantAdded:Connect(function(inst)
+	task.defer(function() if inst.Parent then consider(inst) end end)
+end))
+
+-- verify loop: drop gone / out-of-range objects, rebuild lost indicators
+local running = true
+task.spawn(function()
+	local lastSweep = tick()
+	while running do
+		local me = myPos()
+		for inst, ind in pairs(tracked) do
+			if not inst.Parent then
+				pcall(function() ind.Gui:Destroy() end)
+				tracked[inst] = nil
+			elseif me then
+				local pos = getPosition(inst)
+				local d = pos and (pos - me).Magnitude or math.huge
+				if d > DETECTION_RANGE then
+					pcall(function() ind.Gui:Destroy() end)
+					tracked[inst] = nil
+				elseif not ind.Gui.Parent then
+					tracked[inst] = createIndicator(inst, ind.Target) or nil
+				end
+			end
+		end
+		-- re-check in-range candidates we might have missed (cheap: only DescendantAdded misses)
+		if RESWEEP_EVERY > 0 and tick() - lastSweep >= RESWEEP_EVERY then
+			lastSweep = tick()
+			pcall(sweep)
+		end
+		task.wait(VERIFY_RATE)
+	end
+end)
+
+-- distance text loop
+task.spawn(function()
+	while running do
+		local me = myPos()
+		if me then
+			for inst, ind in pairs(tracked) do
+				if inst.Parent and ind.Gui.Parent then
+					local pos = getPosition(inst)
+					if pos then
+						local d = (pos - me).Magnitude
+						ind.DistanceLabel.Text = math.floor(d) .. " studs"
+						local k = math.clamp(1 - (d / DETECTION_RANGE), 0.3, 1)
+						ind.DistanceLabel.TextColor3 = Color3.fromRGB(255, 255 * (1 - k), 255 * (1 - k))
+					end
+				end
+			end
+		end
+		task.wait(DISTANCE_UPDATE_RATE)
+	end
+end)
+
+getgenv().DarkSeaDetectorStop = function()
+	running = false
+	for _, c in ipairs(conns) do pcall(function() c:Disconnect() end) end
+	conns = {}
+	for _, ind in pairs(tracked) do pcall(function() ind.Gui:Destroy() end) end
+	tracked = {}
+	getgenv().DarkSeaDetectorRunning = false
+end
+
+pcall(sweep)
+notify("Dark Sea Detection Active", "SirenRocks · Hecate's Essence · Prometheus's Acrimony", 3)
+print("[DarkSea] detector started - range " .. DETECTION_RANGE .. " studs")
