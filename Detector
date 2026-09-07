@@ -1,4 +1,4 @@
----[[
+--[[
 	CARGO GRAB CHECK  -  "is it safe to grab this sealed chest right now?"
 	------------------------------------------------------------------
 	The server runs an anti-cheat check called CargoSpeedsBroken every time
